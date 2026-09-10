@@ -1,0 +1,11 @@
+[package]
+name = "pod-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Device-agnostic domain model (patches, tones, amps, cabs, effects) and backend trait for POD X3 editors"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

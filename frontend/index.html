@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POD Controller</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+  /* Studio Dark is the default look. Themes are selected in-app (not tied
+     to host OS light/dark preference) via [data-pod-theme] on <html>,
+     persisted to localStorage. See THEMES in the script below to add more. */
+  :root {
+    --bg: oklch(17% 0.012 260);
+    --panel: oklch(21% 0.013 260);
+    --panel-2: oklch(26% 0.015 260);
+    --border: oklch(32% 0.015 260);
+    --text: oklch(93% 0.008 260);
+    --text-dim: oklch(66% 0.012 260);
+    --text-faint: oklch(46% 0.012 260);
+    --accent-a: oklch(75% 0.15 70);
+    --accent-a-tint: oklch(75% 0.15 70 / 0.14);
+    --accent-b: oklch(75% 0.14 220);
+    --accent-b-tint: oklch(75% 0.14 220 / 0.14);
+    --neutral-knob: oklch(85% 0.01 260);
+    --good: oklch(72% 0.14 145);
+    --good-tint: oklch(72% 0.14 145 / 0.14);
+    --track: oklch(30% 0.012 260);
+  }
+
+  :root[data-pod-theme="slate-dark"] {
+    --bg: oklch(15% 0.014 250);
+    --panel: oklch(19% 0.015 250);
+    --panel-2: oklch(24% 0.017 250);
+    --border: oklch(31% 0.018 250);
+    --text: oklch(93% 0.006 250);
+    --text-dim: oklch(65% 0.01 250);
+    --text-faint: oklch(45% 0.01 250);
+    --accent-a: oklch(75% 0.14 175);
+    --accent-a-tint: oklch(75% 0.14 175 / 0.14);
+    --accent-b: oklch(75% 0.15 300);
+    --accent-b-tint: oklch(75% 0.15 300 / 0.14);
+    --neutral-knob: oklch(85% 0.008 250);
+    --good: oklch(72% 0.14 145);
+    --good-tint: oklch(72% 0.14 145 / 0.14);
+    --track: oklch(29% 0.014 250);
+  }
+
+  :root[data-pod-theme="daylight"] {
+    --bg: oklch(97% 0.006 70);
+    --panel: oklch(99% 0.004 70);
+    --panel-2: oklch(93% 0.008 70);
+    --border: oklch(85% 0.012 70);
+    --text: oklch(24% 0.01 70);
+    --text-dim: oklch(45% 0.012 70);
+    --text-faint: oklch(60% 0.012 70);
+    --accent-a: oklch(56% 0.16 70);
+    --accent-a-tint: oklch(56% 0.16 70 / 0.12);
+    --accent-b: oklch(53% 0.13 220);
+    --accent-b-tint: oklch(53% 0.13 220 / 0.12);
+    --neutral-knob: oklch(55% 0.008 70);
+    --good: oklch(52% 0.13 145);
+    --good-tint: oklch(52% 0.13 145 / 0.12);
+    --track: oklch(88% 0.01 70);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  body {
+    font-family: 'Manrope', sans-serif;
+    color: var(--text);
+  }
+  button { font-family: inherit; cursor: pointer; }
+
+  .app { display: flex; height: 100vh; overflow: hidden; }
+
+  /* Sidebar */
+  .sidebar { width: 296px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 20px 20px 16px; }
+  .brand span { font-size: 15px; font-weight: 700; }
+  .search { margin: 0 16px 14px; display: flex; align-items: center; gap: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: var(--text-faint); font-size: 13px; }
+  .patch-list { flex: 1; overflow: hidden; padding: 4px 10px 0; }
+  .bank-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--text-faint); padding: 10px 10px 6px; }
+  .patch-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px; margin-bottom: 2px; }
+  .patch-row.selected { background: var(--accent-a-tint); }
+  .patch-row .code { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-faint); width: 26px; }
+  .patch-row.selected .code { color: var(--accent-a); }
+  .patch-row .name { font-size: 13px; color: var(--text-dim); flex: 1; }
+  .patch-row.selected .name { color: var(--text); font-weight: 700; }
+  .sidebar-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-faint); }
+
+  /* Main */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar { height: 64px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--border); gap: 20px; }
+  .patch-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .patch-title .code { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-faint); background: var(--panel-2); padding: 3px 8px; border-radius: 6px; }
+  .patch-title .name { font-size: 17px; font-weight: 700; }
+
+  .theme-switcher { display: flex; align-items: center; gap: 6px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 20px; padding: 4px; }
+  .theme-swatch { display: flex; align-items: center; gap: 6px; border: none; background: transparent; color: var(--text-faint); font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 16px; }
+  .theme-swatch .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .theme-swatch[aria-pressed="true"] { background: var(--panel); color: var(--text); }
+  .theme-swatch:focus-visible { outline: 2px solid var(--accent-a); outline-offset: 1px; }
+
+  .status-pill { display: flex; align-items: center; gap: 8px; background: var(--good-tint); padding: 6px 12px; border-radius: 20px; }
+  .status-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  .status-pill span { font-size: 12px; font-weight: 600; color: var(--good); white-space: nowrap; }
+  .save-btn { background: var(--accent-a); color: var(--bg); font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 8px; border: none; white-space: nowrap; }
+
+  .rack { flex: 1; padding: 26px 28px; display: flex; flex-direction: column; gap: 18px; overflow: auto; }
+  .tone-row { display: flex; align-items: center; gap: 14px; }
+  .tone-label { width: 64px; flex-shrink: 0; text-align: center; font-size: 11px; font-weight: 800; letter-spacing: 0.06em; padding: 8px 4px; border-radius: 8px; }
+  .tone-label.a { color: var(--accent-a); background: var(--accent-a-tint); }
+  .tone-label.b { color: var(--accent-b); background: var(--accent-b-tint); }
+  .chain { display: flex; align-items: center; flex: 1; }
+  .io-label { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-faint); padding: 0 10px; }
+  .wire { height: 1px; width: 20px; background: var(--border); }
+  .slot-empty { width: 96px; height: 64px; border: 1px dashed var(--border); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 20px; flex-shrink: 0; }
+  .block { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 9px 14px; flex-shrink: 0; }
+  .block.amp { width: 220px; height: 64px; }
+  .block.fx { width: 130px; height: 64px; padding: 9px 12px; }
+  .block .kind { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: var(--text-faint); }
+  .block .title { font-size: 14px; font-weight: 700; margin-top: 2px; }
+  .block .sub { font-size: 11px; color: var(--text-dim); }
+
+  .bottom-row { display: flex; align-items: center; gap: 24px; margin-top: 8px; }
+  .blend-card { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 22px; }
+  .blend-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .blend-header .label { font-size: 12px; font-weight: 700; color: var(--text-dim); }
+  .blend-header .hint { font-size: 11px; color: var(--text-faint); }
+  .blend-track { flex: 1; height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--accent-a), var(--accent-b)); position: relative; }
+  .blend-puck { position: absolute; left: calc(50% - 8px); top: -6px; width: 18px; height: 18px; border-radius: 50%; background: var(--text); border: 3px solid var(--panel); }
+  .blend-row { display: flex; align-items: center; gap: 12px; }
+  .blend-row .a { font-size: 12px; font-weight: 800; color: var(--accent-a); }
+  .blend-row .b { font-size: 12px; font-weight: 800; color: var(--accent-b); }
+
+  .master-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 20px; display: flex; align-items: center; gap: 14px; }
+  .master-card .name { font-size: 11px; font-weight: 700; letter-spacing: 0.05em; color: var(--text-dim); text-transform: uppercase; }
+  .master-card .value { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-faint); }
+
+  /* Knob: set --v (0-1) and --c (color) per instance */
+  .knob { position: relative; border-radius: 50%; background: conic-gradient(from -135deg, var(--c, var(--accent-a)) 0deg calc(var(--v, 0.5) * 270deg), var(--track) calc(var(--v, 0.5) * 270deg) 270deg, transparent 270deg 360deg); }
+  .knob .pointer { position: absolute; inset: 0; transform: rotate(calc(-135deg + var(--v, 0.5) * 270deg)); }
+  .knob .pointer::after { content: ''; position: absolute; left: 50%; top: 50%; width: 2px; height: 40%; background: var(--text); transform: translate(-50%, -100%); border-radius: 1px; }
+  .knob .face { position: absolute; border-radius: 50%; background: var(--panel-2); box-shadow: inset 0 1px 2px rgba(0,0,0,0.4); inset: 15%; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .theme-swatch, .patch-row { transition: background-color 120ms ease, color 120ms ease; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="var(--accent-a)" stroke-width="2"></circle><line x1="12" y1="12" x2="12" y2="6" stroke="var(--accent-a)" stroke-width="2" stroke-linecap="round"></line></svg>
+      <span>POD Controller</span>
+    </div>
+    <div class="search">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <span>Search patches</span>
+    </div>
+    <div class="patch-list">
+      <div class="bank-label">BANK 01</div>
+      <div class="patch-row"><span class="code">01A</span><span class="name">Surf's Up</span></div>
+      <div class="patch-row"><span class="code">01B</span><span class="name">Garage Crunch</span></div>
+      <div class="patch-row selected"><span class="code">01C</span><span class="name">Clean/Lead Split</span></div>
+      <div class="patch-row"><span class="code">01D</span><span class="name">Ambient Wash</span></div>
+    </div>
+    <div class="sidebar-footer"><span>128 patches</span><span style="color:var(--accent-a);font-weight:600;">Browse all</span></div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div class="patch-title">
+        <span class="code">01C</span>
+        <span class="name">Clean/Lead Split</span>
+      </div>
+
+      <div class="theme-switcher" role="group" aria-label="Theme">
+        <button class="theme-swatch" data-theme-choice="studio-dark" aria-pressed="true">
+          <span class="dot" style="background: oklch(75% 0.15 70);"></span>Studio
+        </button>
+        <button class="theme-swatch" data-theme-choice="slate-dark" aria-pressed="false">
+          <span class="dot" style="background: oklch(75% 0.14 175);"></span>Slate
+        </button>
+        <button class="theme-swatch" data-theme-choice="daylight" aria-pressed="false">
+          <span class="dot" style="background: oklch(56% 0.16 70);"></span>Daylight
+        </button>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:16px;">
+        <div class="status-pill"><span class="dot"></span><span>Connected &middot; POD X3 Live</span></div>
+        <button class="save-btn">Save to Device</button>
+      </div>
+    </div>
+
+    <div class="rack">
+      <div class="tone-row">
+        <div class="tone-label a">TONE A</div>
+        <div class="chain">
+          <span class="io-label">IN</span><div class="wire"></div>
+          <div class="slot-empty">+</div><div class="wire"></div>
+          <div class="block amp" style="border-color: var(--accent-a); box-shadow: 0 0 0 3px var(--accent-a-tint);">
+            <div class="kind">AMP &amp; CAB</div><div class="title">Clean</div><div class="sub">2x12 '65 Blackface</div>
+          </div><div class="wire"></div>
+          <div class="block fx"><div class="kind">MODULATION</div><div class="title" style="font-size:13px;">Sine Chorus</div></div>
+          <div class="wire"></div><span class="io-label">OUT</span>
+        </div>
+      </div>
+
+      <div class="tone-row">
+        <div class="tone-label b">TONE B</div>
+        <div class="chain">
+          <span class="io-label">IN</span><div class="wire"></div>
+          <div class="slot-empty">+</div><div class="wire"></div>
+          <div class="block amp">
+            <div class="kind">AMP &amp; CAB</div><div class="title">Insane</div><div class="sub">4x12 '96 Brit Celest V30s</div>
+          </div><div class="wire"></div>
+          <div class="block fx"><div class="kind">DELAY</div><div class="title" style="font-size:13px;">Analog Delay</div></div>
+          <div class="wire"></div><span class="io-label">OUT</span>
+        </div>
+      </div>
+
+      <div class="bottom-row">
+        <div class="blend-card">
+          <div class="blend-header"><span class="label">Tone Blend</span><span class="hint">Controlled by expression pedal</span></div>
+          <div class="blend-row">
+            <span class="a">A</span>
+            <div class="blend-track"><div class="blend-puck"></div></div>
+            <span class="b">B</span>
+          </div>
+        </div>
+
+        <div class="master-card">
+          <div class="knob" style="--v:0.75; --c:var(--neutral-knob); width:52px; height:52px;">
+            <div class="pointer"></div><div class="face"></div>
+          </div>
+          <div><div class="name">Master</div><div class="value">75%</div></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  (function () {
+    var STORAGE_KEY = 'pod-controller-theme';
+    var THEMES = ['studio-dark', 'slate-dark', 'daylight'];
+
+    function applyTheme(name) {
+      if (THEMES.indexOf(name) === -1) name = 'studio-dark';
+      document.documentElement.setAttribute('data-pod-theme', name);
+      document.querySelectorAll('.theme-swatch').forEach(function (btn) {
+        btn.setAttribute('aria-pressed', String(btn.dataset.themeChoice === name));
+      });
+      try { localStorage.setItem(STORAGE_KEY, name); } catch (e) {}
+    }
+
+    var stored = 'studio-dark';
+    try { stored = localStorage.getItem(STORAGE_KEY) || stored; } catch (e) {}
+    applyTheme(stored);
+
+    document.querySelectorAll('.theme-swatch').forEach(function (btn) {
+      btn.addEventListener('click', function () { applyTheme(btn.dataset.themeChoice); });
+    });
+  })();
+</script>
+</body>
+</html>
