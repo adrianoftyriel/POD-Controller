@@ -1,0 +1,16 @@
+[package]
+name = "pod-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for probing/testing a POD X3 over USB (dev tool, not an end-user app)"
+
+[[bin]]
+name = "pod-cli"
+path = "src/main.rs"
+
+[dependencies]
+pod-core = { path = "../pod-core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
