@@ -165,17 +165,26 @@ pub fn encode_chunks(message: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Reassembles a stream of raw bulk-IN packets (of any size — typically
-/// [`BULK_PACKET_LEN`]-byte reads) into complete protocol messages, per the
-/// chunk framing in docs/PROTOCOL.md: a message is one or more chunks (a
-/// 4-byte header + up to [`CHUNK_MAX_PAYLOAD`] bytes of payload each), and
-/// chunk boundaries are not aligned to raw packet boundaries. A chunk
-/// shorter than [`CHUNK_MAX_PAYLOAD`] terminates the message.
+/// Reassembles a stream of raw bulk-IN reads into message bytes by
+/// stripping each chunk's own 4-byte header (contents_length + flags) and
+/// concatenating the payloads.
+///
+/// There is no in-band end-of-message marker: a chunk's `contents_length`
+/// describes only that chunk, and a chunk shorter than the sender's usual
+/// max does **not** reliably mean "last chunk of the message" — confirmed
+/// against real hardware, where the device's own EffectDump reply opens
+/// with a 24-byte chunk (well under its own 60-byte-per-packet norm) and
+/// then keeps going. Callers must know the expected total message length
+/// up front (fixed per message type by protocol design) and keep calling
+/// [`Self::push`] until they have that many bytes; there's no way to
+/// detect "message complete" from the framing alone.
+///
+/// One `ChunkReassembler` is meant to reassemble exactly one message —
+/// construct a fresh one per `transact()`-style call.
 #[derive(Default)]
 pub struct ChunkReassembler {
     raw: Vec<u8>,
     pos: usize,
-    message: Vec<u8>,
 }
 
 impl ChunkReassembler {
@@ -183,37 +192,27 @@ impl ChunkReassembler {
         Self::default()
     }
 
-    /// Feed one raw bulk-IN read. Returns `Some(payload)` once a full
-    /// message has been reassembled.
-    pub fn push(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
+    /// Feed one raw bulk-IN read. Returns whatever newly-available message
+    /// bytes it contained (zero or more complete chunks' worth — never a
+    /// partial chunk).
+    pub fn push(&mut self, packet: &[u8]) -> Result<Vec<u8>> {
         self.raw.extend_from_slice(packet);
+        let mut out = Vec::new();
         loop {
             if self.raw.len() - self.pos < CHUNK_HEADER_LEN {
-                return Ok(None);
+                break;
             }
             let header = PacketHeader::parse(&self.raw[self.pos..]).expect("length checked above");
             let contents_length = header.contents_length as usize;
             let body_start = self.pos + CHUNK_HEADER_LEN;
             let body_end = body_start + contents_length;
             if self.raw.len() < body_end {
-                return Ok(None);
+                break;
             }
-
-            if header.flags & FLAG_FIRST != 0 {
-                self.message.clear();
-            }
-            self.message
-                .extend_from_slice(&self.raw[body_start..body_end]);
+            out.extend_from_slice(&self.raw[body_start..body_end]);
             self.pos = body_end;
-
-            if contents_length < CHUNK_MAX_PAYLOAD {
-                let msg = std::mem::take(&mut self.message);
-                self.raw.drain(..self.pos);
-                self.pos = 0;
-                return Ok(Some(msg));
-            }
-            // Full-size chunk: more chunks follow for this same message.
         }
+        Ok(out)
     }
 }
 
@@ -404,11 +403,11 @@ mod tests {
     }
 
     #[test]
-    fn reassembler_handles_single_chunk_message() {
+    fn reassembler_strips_chunk_header_from_single_chunk_message() {
         let mut r = ChunkReassembler::new();
         let packet = encode_float_param(5, 1.0);
         let result = r.push(&packet).unwrap();
-        assert_eq!(result, Some(packet[4..].to_vec()));
+        assert_eq!(result, packet[4..].to_vec());
     }
 
     #[test]
@@ -438,13 +437,11 @@ mod tests {
         let framed = encode_chunks(&message);
 
         let mut reassembler = ChunkReassembler::new();
-        let mut result = None;
+        let mut result = Vec::new();
         for packet in framed.chunks(BULK_PACKET_LEN) {
-            if let Some(msg) = reassembler.push(packet).unwrap() {
-                result = Some(msg);
-            }
+            result.extend(reassembler.push(packet).unwrap());
         }
-        assert_eq!(result, Some(message));
+        assert_eq!(result, message);
     }
 
     #[test]
@@ -453,13 +450,34 @@ mod tests {
         let framed = encode_chunks(&message);
 
         let mut reassembler = ChunkReassembler::new();
-        let mut result = None;
+        let mut result = Vec::new();
         for packet in framed.chunks(7) {
-            if let Some(msg) = reassembler.push(packet).unwrap() {
-                result = Some(msg);
-            }
+            result.extend(reassembler.push(packet).unwrap());
         }
-        assert_eq!(result, Some(message));
+        assert_eq!(result, message);
+    }
+
+    #[test]
+    fn chunk_reassembler_does_not_stop_early_on_a_short_non_final_chunk() {
+        // Confirmed against real hardware: the device's EffectDump reply
+        // opens with a short (24-byte) chunk and then keeps sending.
+        let mut message = vec![4u8; 24];
+        message.extend(vec![5u8; 60]);
+        message.extend(vec![6u8; 60]);
+
+        let mut framed = vec![24, 0x00, FLAG_FIRST, 0x00];
+        framed.extend_from_slice(&message[0..24]);
+        framed.extend([60, 0x00, FLAG_CONTINUATION, 0x00]);
+        framed.extend_from_slice(&message[24..84]);
+        framed.extend([60, 0x00, FLAG_CONTINUATION, 0x00]);
+        framed.extend_from_slice(&message[84..144]);
+
+        let mut reassembler = ChunkReassembler::new();
+        let mut result = Vec::new();
+        for packet in framed.chunks(64) {
+            result.extend(reassembler.push(packet).unwrap());
+        }
+        assert_eq!(result, message);
     }
 
     #[test]

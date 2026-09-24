@@ -53,24 +53,29 @@ impl PodDevice {
         })
     }
 
-    /// Send one bulk-framed message and wait for the device's reply,
-    /// reassembling it if it spans multiple packets. This does not yet
+    /// Send one bulk-framed message and read exactly `expected_reply_len`
+    /// bytes of reply, reassembling it if it spans multiple packets.
+    /// Callers must know the reply length up front — there's no in-band
+    /// end-of-message marker (see [`ChunkReassembler`]). This does not yet
     /// implement the control-transfer init handshake (`CTRL_REQUEST`) —
     /// callers should perform that once at startup if the device requires
     /// it (unconfirmed whether it's strictly necessary before bulk I/O).
-    pub fn transact(&mut self, request: &[u8]) -> Result<Vec<u8>> {
+    pub fn transact(&mut self, request: &[u8], expected_reply_len: usize) -> Result<Vec<u8>> {
         self.write_raw(request)?;
 
         let mut reassembler = ChunkReassembler::new();
-        loop {
+        let mut message = Vec::with_capacity(expected_reply_len);
+        while message.len() < expected_reply_len {
             let packet = self.read_raw()?;
-            if let Some(payload) = reassembler.push(&packet)? {
-                return Ok(payload);
-            }
+            message.extend(reassembler.push(&packet)?);
         }
+        Ok(message)
     }
 
-    fn write_raw(&mut self, data: &[u8]) -> Result<()> {
+    /// Send already chunk-framed bytes with no attempt to read a reply.
+    /// Low-level primitive for RE/probing — prefer [`Self::transact`] or a
+    /// typed method when the message shape is known.
+    pub fn write_raw(&mut self, data: &[u8]) -> Result<()> {
         let mut buf = Buffer::new(data.len());
         buf.extend_from_slice(data);
         let completion = self.out_ep.transfer_blocking(buf, TIMEOUT);
@@ -80,7 +85,9 @@ impl PodDevice {
         Ok(())
     }
 
-    fn read_raw(&mut self) -> Result<Vec<u8>> {
+    /// Read one raw [`protocol::BULK_PACKET_LEN`]-byte bulk-IN packet, with
+    /// no chunk/message reassembly. Low-level primitive for RE/probing.
+    pub fn read_raw(&mut self) -> Result<Vec<u8>> {
         let buf = Buffer::new(protocol::BULK_PACKET_LEN);
         let completion = self.in_ep.transfer_blocking(buf, TIMEOUT);
         completion
@@ -102,15 +109,22 @@ impl PodDevice {
     /// `docs/PROTOCOL.md` "Slot numbering".
     pub fn read_patch(&mut self, slot: u8) -> Result<Vec<u8>> {
         let request = protocol::encode_request_dump(slot);
-        let reply = self.transact(&request)?;
+        let reply = self.transact(&request, 8 + protocol::EFFECT_DUMP_LEN)?;
         protocol::decode_effect_dump(&reply).map(|patch| patch.to_vec())
     }
 
     /// Write a raw, opaque EffectDump blob (as produced by [`Self::read_patch`])
     /// to `slot`, and wait for the device's ack.
+    ///
+    /// The ack's exact length is unconfirmed against real hardware (only
+    /// the read path has been verified so far) — this reads a single raw
+    /// packet's worth and only checks the leading message-type byte. If
+    /// the real ack turns out to be multi-packet, this will misread it.
     pub fn write_patch(&mut self, slot: u8, patch: &[u8]) -> Result<()> {
         let message = protocol::encode_write_dump(slot, patch)?;
-        let ack = self.transact(&message)?;
+        self.write_raw(&message)?;
+        let packet = self.read_raw()?;
+        let ack = ChunkReassembler::new().push(&packet)?;
         if ack.first().copied() != Some(protocol::MessageType::ConfigCmd as u8) {
             return Err(PodError::Protocol(format!(
                 "expected ConfigCmd ack after patch write, got {ack:02x?}"

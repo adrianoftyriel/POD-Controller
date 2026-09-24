@@ -66,6 +66,30 @@ enum Command {
         #[arg(long)]
         enabled: bool,
     },
+    /// Send an arbitrary hex-encoded message and print each raw 64-byte
+    /// bulk-IN packet received afterward, unprocessed (no chunk/message
+    /// reassembly — there's no in-band end-of-message marker, so a generic
+    /// probe can't know how many bytes to expect). Dev/RE tool: for
+    /// probing message shapes that aren't yet wrapped in a typed command.
+    RawPackets {
+        /// Message bytes as hex, no spaces. Leave empty to just listen.
+        #[arg(long, default_value = "")]
+        message: String,
+        /// Number of 64-byte packets to read.
+        #[arg(long, default_value_t = 8)]
+        count: usize,
+    },
+}
+
+fn parse_hex(s: &str) -> anyhow::Result<Vec<u8>> {
+    let s = s.trim();
+    if !s.len().is_multiple_of(2) {
+        anyhow::bail!("hex string must have an even number of digits");
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(anyhow::Error::from))
+        .collect()
 }
 
 fn main() -> anyhow::Result<()> {
@@ -135,6 +159,34 @@ fn main() -> anyhow::Result<()> {
             dev.set_block_enabled(tone, block, enabled)?;
             println!("Set tone {tone} block {block:?} enabled={enabled}");
         }
+        Command::RawPackets { message, count } => {
+            let mut dev = PodDevice::open_first()?;
+            if !message.is_empty() {
+                let bytes = parse_hex(&message)?;
+                let framed = pod_core::protocol::encode_chunks(&bytes);
+                dev.write_raw(&framed)?;
+                println!("Sent {} message bytes.", bytes.len());
+            }
+            for i in 0..count {
+                match dev.read_raw() {
+                    Ok(packet) => println!(
+                        "packet[{i}] ({} bytes): {}",
+                        packet.len(),
+                        hex::encode(&packet)
+                    ),
+                    Err(e) => {
+                        println!("packet[{i}]: error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
     }
     Ok(())
+}
+
+mod hex {
+    pub fn encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }

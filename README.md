@@ -20,7 +20,10 @@ GPLv2) and tracks the parallel community effort in
 
 ## Status
 
-Early scaffolding. No working hardware communication yet in this repo.
+Reading patches from a real POD X3 Live is confirmed working
+(`pod-cli dump`). Writing (`restore`) and live parameter edits
+(`set-amp`, `block`) are implemented against the documented protocol but
+not yet confirmed on hardware.
 
 ## Planned phasing
 

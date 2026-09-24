@@ -66,6 +66,22 @@ A message longer than 252 bytes is split across chunks: the first has flag
 payloads. Its total length comes from the message itself (e.g. 4104 for an
 EffectDump reply), not from any one header. `tools/vm-capture/msgs.py`
 reassembles this way. (Reference
+
+**Direction asymmetry, confirmed against a real POD X3 Live via `pod-cli`
+(2026-09-24):** the 252-byte chunk size above describes how *Gearbox*
+frames its writes; the *device's own* replies use one chunk per raw
+64-byte packet (4-byte header + up to 60 bytes payload each), and the
+first chunk of a reply is not necessarily full-size — a real EffectDump
+reply's opening chunk carried only 24 bytes (the 8-byte common header +
+the 16-byte tone-name field) before continuing for many more full
+60-byte chunks. **A chunk shorter than the sender's usual max does not
+mean "last chunk of the message."** There is no in-band end-of-message
+marker at all: a receiver must know the target message's total length
+up front (fixed per message type, e.g. 4104 for an EffectDump reply) and
+keep reading chunks until it has that many bytes. `pod-core`'s
+`ChunkReassembler` works this way; earlier code here (and prior wording
+in this doc) assumed a short chunk always terminates a message, which is
+wrong and caused real read failures against hardware.
 implementation: `PacketCompleter` in andree182/podx3.)
 
 ## Message types (payload byte 0, after the 4-byte framing header)
