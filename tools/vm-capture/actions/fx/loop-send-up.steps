@@ -1,0 +1,4 @@
+# 8D tone 1: open loop panel, drag send knob up 8px
+click 378 258
+sleep 0.8
+drag 210 378 210 370 4

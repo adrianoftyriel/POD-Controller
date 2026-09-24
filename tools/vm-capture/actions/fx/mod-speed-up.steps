@@ -1,0 +1,4 @@
+# 8D tone 1: open mod panel, drag speed knob up 8px
+click 628 258
+sleep 0.8
+drag 215 366 215 358 4

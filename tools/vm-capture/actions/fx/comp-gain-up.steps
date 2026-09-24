@@ -1,0 +1,4 @@
+# 8D tone 1: open comp panel, drag gain knob up 8px
+click 478 258
+sleep 0.8
+drag 437 378 437 370 4

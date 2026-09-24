@@ -1,0 +1,4 @@
+# 8D tone 1: open comp panel, drag threshold knob up 8px
+click 478 258
+sleep 0.8
+drag 280 378 280 370 4

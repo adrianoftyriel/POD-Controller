@@ -9,16 +9,31 @@ import sys
 HEADER = 0xE4
 BLOCK = 0x8C
 NBLOCKS = 12
-# (slot, group) -> block name, from the live int-set captures.
-NAMES = {(0, 2): "gate", (2, 2): "wah", (3, 2): "stomp", (0, 3): "amp",
-         (1, 3): "cab", (4, 3): "eq", (0, 5): "comp", (3, 5): "mod",
-         (4, 5): "delay", (5, 5): "reverb"}
+# Record +2 (model table) -> block name. Slot/group can't be used: they
+# are the chain position and move when a block is switched pre/post.
+TABLES = {0x02: "delay", 0x03: "mod", 0x04: "reverb", 0x05: "stomp",
+          0x06: "wah", 0x07: "volume", 0x0A: "stomp", 0x0C: "eq"}
+MISC = {0: "gate", 1: "comp", 10: "loop"}   # table 0x0B, by model
+
+
+def block_name(b):
+    cat, table = b["kind"] >> 8, b["kind"] & 0xFF
+    if cat == 0:
+        return "amp"
+    if cat == 1:
+        return "cab"
+    if table == 0x0B:
+        return MISC.get(b["model"], "0B?")
+    return TABLES.get(table, "?")
+
+
+# Parameter namespaces (the u16 after idx). A parameter is identified by
+# (idx, namespace); every value seen so far is a little-endian f32.
+NS = {0x3F10: "", 0x3F01: "m", 0x3F00: "u"}   # knob 0-1, mix 0-1, real units
 
 
 def fmt_value(kind, raw):
-    if kind == 0x3F10:
-        return f"{struct.unpack('<f', raw)[0]:.4f}"
-    return raw.hex()
+    return f"{struct.unpack('<f', raw)[0]:.4g}"
 
 
 def parse_tone(t):
@@ -46,8 +61,8 @@ def main():
             name, blocks = parse_tone(data[tone * 2048:(tone + 1) * 2048])
             print(f"== {path} tone {tone + 1}: {name!r}")
             for b in blocks:
-                label = NAMES.get((b["slot"], b["group"]), "?")
-                ps = " ".join(f"{i}:{fmt_value(t, v)}" + ("" if t == 0x3F10 else f"[{t:04x}]")
+                label = block_name(b)
+                ps = " ".join(f"{NS.get(t, f'[{t:04x}]')}{i}={fmt_value(t, v)}"
                               for i, t, v in b["params"])
                 flag = " TAIL!" if b["tail_nonzero"] or any(b["pad"]) else ""
                 print(f"  [{b['n']:2}] {label:6} slot={b['slot']:2} grp={b['group']} "

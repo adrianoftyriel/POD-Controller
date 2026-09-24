@@ -1,0 +1,4 @@
+# 8D tone 1: open mod panel, drag wave knob up 8px
+click 628 258
+sleep 0.8
+drag 460 386 460 378 4

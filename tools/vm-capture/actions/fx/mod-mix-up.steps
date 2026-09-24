@@ -1,0 +1,4 @@
+# 8D tone 1: open mod panel, drag mix knob up 8px
+click 628 258
+sleep 0.8
+drag 535 386 535 378 4

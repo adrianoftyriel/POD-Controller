@@ -1,0 +1,4 @@
+# 8D tone 1: open delay panel, drag drive knob up 8px
+click 678 258
+sleep 0.8
+drag 412 375 412 367 4

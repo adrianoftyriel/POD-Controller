@@ -1,0 +1,4 @@
+# 8D tone 1: open eq panel, drag freq1 knob up 8px
+click 528 258
+sleep 0.8
+drag 261 340 261 332 4

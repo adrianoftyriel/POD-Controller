@@ -166,6 +166,32 @@ sends `01` there (so the earlier example with `01` was a Tone 2 edit). The
 `01 00 00 00` and `10 3F` fields are still unknown. Inside the EffectDump,
 parameters are stored as `<idx u16> 10 3F <f32>` too (see below).
 
+### Effect knob map (float sets, 8D tone 1)
+
+Captured by nudging every knob on each effect panel
+(`tools/vm-capture/actions/fx/`). Keys are `idx`/namespace (`k` = `10 3F`,
+`m` = `01 3F`, `u` = `00 3F`), and the block is addressed by its current
+chain slot/group. Model-specific knobs will differ for other models.
+
+| Block (model on 8D) | slot/group | Knobs |
+|---|---|---|
+| Gate | 0/2 | Threshold `0u` (dB), Decay `3u` |
+| Wah (Vetta Wah) | 2/2 | Position `1u` |
+| Stomp (Fuzz Pi) | 3/2 | Drive `1k`, Gain `2k`, Tone `3k` |
+| FX loop | 12/2 | Send `1u`, Return `2u`, Mix `1m` |
+| Comp | 0/5 | Threshold `0k`, Gain `1k` |
+| EQ (4 Band Semi-Param) | 4/3 | band *n* (0-3): Freq `(2n)k`, Gain `(2n+1)k` (checked: band 1 freq `0k`, gain `1k`; band 4 gain `7k`) |
+| Volume pedal | 2/5 | Min `4u`, Max `5u` |
+| Mod (Bias Tremolo) | 3/5 | Speed `0k`, Wave `1k`, Mix `1m` |
+| Delay (Tube Echo) | 4/5 | Time `0k`, Feedback `1k`, Flutter `2k`, Drive `3k`, Mix `1m` |
+| Reverb (Brite Room) | 5/5 | Decay `0k`, Pre-delay `1k`, Tone `2k`, Mix `2m` |
+| Amp | 0/3 | Bass `0k`, Middle `1k`, Treble `2k`, Drive `3k`, Presence `4k`, Volume `5k` |
+
+The Time (delay) and Speed (mod) knobs also send an int message with
+sub `0x14` for the same slot/group, value `0`, once per step. It is
+probably "tempo sync off" (the panels have an FX TEMPO on/off button).
+Unconfirmed.
+
 ### EffectDump layout (confirmed)
 
 `02`/`00` with slot `0x10` got a 4104-byte `01`/`01` reply: an 8-byte
@@ -202,13 +228,20 @@ a block is switched between pre and post. Mod shows up as slot 3/group 5
 or 9/5. The live int/float sets address a block by its current slot and
 group, not by record index.
 
-Parameter `type`:
+Parameter records: `<idx u16> <namespace u16> <f32 LE>`. **A parameter is
+identified by (idx, namespace), not idx alone.** The delay block, for
+example, has Feedback at `1`/`10 3F` and Mix at `1`/`01 3F`. Every value
+seen so far is a float:
 
-| type (LE bytes) | Meaning |
+| namespace (LE bytes) | Meaning |
 |---|---|
-| `10 3F` | float 0.0-1.0 (all knobs so far, including the amp knobs) |
-| `00 3F` | float in real units. Gate threshold `0xC2680000` = -58.0 dB, matching the UI; volume pedal max `1.0` |
-| `01 3F` | a different encoding (delay/mod time, reverb pre-delay...). Unknown |
+| `10 3F` | normal knobs, 0.0-1.0 |
+| `01 3F` | the Mix knob of mod/delay/reverb/loop, 0.0-1.0 |
+| `00 3F` | real units: gate threshold in dB (-58.0 shows as "-58 dB"), gate decay, wah position, volume pedal min/max, loop send/return |
+
+Live float sets (`06`/`15`) carry the same `<idx> <namespace> <f32>` at
+message offset `0x14`, so the knob map below applies to both. See the next
+section.
 
 Some records have stale non-zero bytes after their last parameter,
 probably left over from a previous model. The unit accepts them.
@@ -259,11 +292,9 @@ obvious pattern (`42`, `53`, `0F`, `F7`, ...), which is still unknown.
 
 ## What's genuinely unknown
 
-1. **What each effect parameter `idx` means.** The record structure and
-   the model tables are known, but which knob a given `idx` is (and the
-   ranges of the `00 3F` / `01 3F` types) still has to be mapped per model.
-   Turning each effect knob in Gearbox gives this directly, because float
-   sets use the same `idx`.
+1. **Knob maps for other effect models.** The knob map above covers the
+   models loaded on 8D. Other models (and their `u` real-unit ranges)
+   need the same knob sweep, run with each model loaded.
 2. **The rest of the tone header** (0x00-0xE3): inputs, pedal/tweak
    assignments, the `0x28` pair and the `0x40` record are unmapped. Only the
    name and the (likely) tempo are identified.
