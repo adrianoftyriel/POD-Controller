@@ -38,12 +38,18 @@ AXIS_MAX = 32767
 
 class QMP:
     def __init__(self, vmid):
+        # QEMU serves one QMP client at a time; a second client blocks until
+        # the first disconnects. Time out instead of hanging forever.
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(10)
         self.sock.connect(f"/var/run/qemu-server/{vmid}.qmp")
         self.buf = b""
         self._read()  # greeting
         self.cmd("qmp_capabilities")
         self._size = None
+
+    def close(self):
+        self.sock.close()
 
     def _read(self):
         while b"\n" not in self.buf:

@@ -101,6 +101,16 @@ list's title bar colour) before clicking in either one.
 - `parse_tone.py <dump.bin>...`: print both tones' 12 block records
   (slot/group, model, enabled, params) from a 4096-byte dump.
 - `vmctl.py <vmid> type <text>` types printable ASCII (US layout).
+- `tweak_sweep.py <vmid> <bank> <A-D>`: map knob names to parameter IDs
+  for every model in a patch, using the Tweak 1/2 menus (OCR'd with
+  tesseract) and the keys each entry sends. Appends to
+  `captures/tweak_map.jsonl`. Only the edit buffer changes.
+- `put8d.sh <vmid> <name> <prev.bin>`: PUT the edited patch to 8D and diff
+  the written blob (bank 8 only).
+
+**QEMU serves one QMP client at a time.** A second `vmctl.py` blocks (and
+now times out after 10 s) while another holds the socket, so never run
+two VM-driving scripts at once.
 
 ### Manual
 
