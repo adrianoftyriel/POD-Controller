@@ -108,6 +108,14 @@ list's title bar colour) before clicking in either one.
 - `put8d.sh <vmid> <name> <prev.bin>`: PUT the edited patch to 8D and diff
   the written blob (bank 8 only).
 
+**`tweak_sweep.py` leaves every swept patch "edited" in Gearbox's cache**
+(it changes the Tweak assignment). The POD itself is untouched, but in
+that state a PUT ALL would overwrite every patch on the unit. Run GET ALL
+afterwards, which re-reads all 64 patches from the POD, to clear it.
+
+Always check the tone name after loading a patch before editing: a
+double-click that doesn't register leaves the previous patch active.
+
 **QEMU serves one QMP client at a time.** A second `vmctl.py` blocks (and
 now times out after 10 s) while another holds the socket, so never run
 two VM-driving scripts at once.

@@ -175,6 +175,61 @@ sends `01` there (so the earlier example with `01` was a Tone 2 edit). The
 `01 00 00 00` and `10 3F` fields are still unknown. Inside the EffectDump,
 parameters are stored as `<idx u16> 10 3F <f32>` too (see below).
 
+### Signal chain (confirmed 2026-09-24)
+
+The chain is **fixed except for five blocks that can each sit pre- or
+post-amp**: Volume, FX Loop, Mod, Delay and Reverb. Gate, Wah, Stomp,
+Amp/Cab, Comp and EQ have no PRE/POST switch, and Gearbox has no
+drag-to-reorder (dragging a block on the chain strip sends nothing).
+
+Each block has exactly two possible positions, as (slot, group):
+
+| Block | Pre (group 2) | Post (group 5) |
+|---|---|---|
+| Volume | 1 / 2 | 2 / 5 |
+| Mod | 4 / 2 | 3 / 5 |
+| Delay | 5 / 2 | 4 / 5 |
+| Reverb | 6 / 2 | 5 / 5 |
+| FX Loop | 12 / 2 | 9 / 5 |
+| *fixed:* Gate 0/2, Wah 2/2, Stomp 3/2, Amp 0/3, Cab 1/3, EQ 4/3, Comp 0/5 | | |
+
+The order Gearbox draws is always:
+
+```
+Gate  [Vol]  Wah  Stomp  [Mod] [Delay] [Verb] [Loop]  Amp  Comp  EQ  [Vol] [Loop] [Mod] [Delay] [Verb]
+```
+
+Each bracketed block appears in exactly one of its two places. In the pre
+group this matches the slot numbers. In the post group it doesn't (Comp
+0/5 and EQ 4/3 are drawn together after the amp, and the Loop at 9/5 is
+drawn before Mod at 3/5), so **the slot number is a position ID, not a
+sort key**. The real DSP order is presumably fixed in firmware, and
+Gearbox's drawing is the best available evidence for it.
+
+A move is one int set, sub `0x12`, addressed by the block's current
+position, with the new position as the value:
+
+```
+04 00 0A 40 01 03 00 12 <tone u32> <slot u16> <group u16> <new slot u16> <new group u16>
+```
+
+The POD replies with an unsolicited `04`/`13` on channel `00` that turns
+the block on at its new position (Gearbox shows it as ON afterwards), and
+Gearbox follows up with a `02`/`21` query. In the stored patch only the
+block record's `+0x04` slot and `+0x06` group change (plus `+0x08` enabled
+if it was off). The record keeps its place in the 12-record list. Verified
+by a PUT of 8D with Vol and Reverb moved pre and the Loop moved post.
+
+**Open:** whether the POD accepts positions other than the two listed per
+block (e.g. Mod at 7/2) if sent directly. Gearbox never generates them, so
+this needs testing from pod-core, on bank 8.
+
+### GET ALL
+
+GET ALL is just 64 `02`/`00` dump requests, slot 0 to 63, each answered
+by a 4104-byte `01`/`01`, at about 0.14 s per patch (about 9 s total),
+followed by the usual load of the active patch.
+
 ### Effect knob map (float sets, 8D tone 1)
 
 Captured by nudging every knob on each effect panel

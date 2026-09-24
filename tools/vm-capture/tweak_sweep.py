@@ -12,6 +12,10 @@ Both tones are swept (Tweak 1 = tone 1, Tweak 2 = tone 2).
 
 Usage: tweak_sweep.py <vmid> <bank 1-16> <A-D> [--out results.jsonl]
 
+Afterwards every swept patch shows as edited in Gearbox (its Tweak
+assignment changed). Run GET ALL to restore Gearbox's copies from the POD
+before doing anything with PUT.
+
 Assumes the 1280x1024 layout (see README) with both Gearbox windows open.
 Needs tesseract-ocr and ImageMagick on the host.
 """
