@@ -1,0 +1,10 @@
+# Tone 1: pick cab "4x10 1958 Tweed B-Man" from CAB MODEL > Guitar Cab Models
+click 600 221
+sleep 0.8
+move 560 240
+sleep 0.8
+move 400 240
+sleep 0.3
+move 380 434
+sleep 0.3
+click 380 434

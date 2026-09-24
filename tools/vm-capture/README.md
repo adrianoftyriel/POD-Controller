@@ -60,6 +60,20 @@ y=282 (Gate 229, Wah 277, Stomp 328, Amp 378, Comp 428, EQ 479, Vol 528,
 Mod 627, Delay 677, Verb 727). Clicking the upper half of a block (y≈258)
 opens its panel instead of toggling it.
 
+**The layout depends on the amp model.** Each amp has its own skin, so
+knob positions (and even the block row) move when the amp changes. The
+coordinates above are for "1958 Tweed B-Man" (patch 5A, Tone 1). Take a
+screenshot (`./vmctl.py <vmid> screenshot x.png`) and check before writing
+steps for another tone.
+
+Model menus: AMP MODEL (290,221) and CAB MODEL (600,221) open a menu, then a
+"Guitar ... Models" submenu. See `actions/amp-model-*.steps` and
+`actions/cab-*.steps` for the hover path that keeps the submenu open. The
+Hardware Memory window (patch slots) sits behind the GearBox window. Double-click a
+slot's channel letter to load it (a single click only selects it).
+GET SELECTED asks for a Yes/No confirmation first. Avoid PUT and SAVE in
+automated runs, because they overwrite patches stored on the unit.
+
 ### Manual
 
 ```

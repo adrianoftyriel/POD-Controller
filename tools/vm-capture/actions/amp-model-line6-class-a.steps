@@ -1,0 +1,10 @@
+# Tone 1: pick amp model "Line 6 Class A" from AMP MODEL > Guitar Amp Models
+click 290 221
+sleep 0.8
+move 255 240
+sleep 0.8
+move 400 240
+sleep 0.3
+move 420 48
+sleep 0.3
+click 420 48

@@ -1,0 +1,10 @@
+# Tone 1: pick amp model "1965 Double Verb" from AMP MODEL > Guitar Amp Models
+click 290 221
+sleep 0.8
+move 255 240
+sleep 0.8
+move 400 240
+sleep 0.3
+move 420 191
+sleep 0.3
+click 420 191

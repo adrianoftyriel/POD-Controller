@@ -85,30 +85,73 @@ indices by trial against real hardware and record them here as found.
 
 Captured with `tools/vm-capture/` (Gearbox on a Windows 7 VM, POD X3 Live
 passed through by device, host-side `usbmon`). Each finding comes from a
-single scripted UI action with its own capture in `captures/`.
+single scripted UI action with its own capture in `captures/`. Offsets
+below are into the **message** (after the 4-byte bulk framing header)
+unless marked "packet".
 
-Setting a parameter from the Gearbox UI is **fire-and-forget**: one bulk
-OUT on endpoint `0x01` per value change, and no bulk IN reply appeared in
-any of the captures. Knob drags stream one float set per mouse step (with
-the occasional back-to-back duplicate), not just the final value.
-
-### Int set (`0x04`): block on/off
+### Common message header
 
 ```
-14 00 01 00  04 00 0A 40 01 03 00 13 00 00 00 00 00 00 02 00 <u32 LE value>
++0  type        01 EffectDump, 02 ConfigCmd, 04 int, 05 ?, 06 float
++1  ??          00, except 02 on per-tone dump pushes and 04 on the EffectDump reply
++2  route (4)   host->POD: 0A 40 <ch> 03    POD->host: 0A 03 <ch> 40
++6  00
++7  subcommand  (table below)
++8  tone        00 = Tone 1, 01 = Tone 2 (for per-tone messages)
 ```
 
-| Control | Offset 0x12 (u16?) | Values |
+`<ch>` is `01` for live edits and `02` for patch-memory traffic (slot
+select, dump push/read). Replies swap the two halves of the route, so these
+bytes look like source/destination addresses.
+
+| Type | Sub | Direction | Meaning |
+|---|---|---|---|
+| `04` | `13` | host->POD | int parameter set |
+| `06` | `15` | host->POD | float parameter set |
+| `05` | `16` | host->POD | sent in pairs on tone switch, value 0/1 per tone (focus flags?) |
+| `04` | `20` | host->POD | select tone for editing (value = tone index) |
+| `02` | `21` | host->POD | query (arg `03`, `07` seen, meaning unknown) |
+| `04` | `22` | POD->host | answer to `21` |
+| `02` | `00` | host->POD | **request EffectDump**, u32 arg = slot |
+| `01` | `01` | POD->host | **EffectDump** reply (4104 bytes) |
+| `02` | `04` | host->POD | push one tone's 2048-byte block into the edit buffer |
+| `02` | `27` | host->POD | select patch slot, u32 arg = slot |
+| `02` | `03` | POD->host | ack for `04` pushes |
+
+Slot numbering is `(bank-1)*4 + channel`, with A=0..D=3 (5A = `0x10`).
+
+Setting a parameter is **fire-and-forget**: one bulk OUT per value change,
+with no reply. Knob drags stream one float set per mouse step.
+
+### Int set (`04`/`13`): block on/off
+
+```
+04 00 0A 40 01 03 00 13 <tone> 00 00 00 <slot u16> <group u16> <u32 LE value>
+```
+
+| Block | slot | group |
 |---|---|---|
-| Noise gate on/off | `02 00` | `00000000` off, `01000000` on |
+| Gate | `00` | `02` |
+| Wah | `02` | `02` |
+| Stomp | `03` | `02` |
+| Amp (sends slot `00` and `01`, amp+cab?) | `00`,`01` | `03` |
+| EQ | `04` | `03` |
+| Comp | `00` | `05` |
+| Mod | `03` | `05` |
+| Delay | `04` | `05` |
+| Reverb | `05` | `05` |
 
-### Float set (`0x06`): amp knobs
+Values: `0` = off, `1` = on. VOL has no on/off switch in the UI.
+
+### Float set (`06`/`15`): amp knobs
 
 ```
-1C 00 01 00  06 00 0A 40 01 03 00 15 00 00 00 00 00 00 03 00 01 00 00 00 <idx> 00 10 3F <f32 LE>
+06 00 0A 40 01 03 00 15 <tone> 00 00 00 <slot u16> <group u16> 01 00 00 00 <idx u16> 10 3F <f32 LE>
 ```
 
-| Knob | `idx` (offset 0x18) |
+The amp knobs are slot `00`, group `03`:
+
+| Knob | `idx` |
 |---|---|
 | Bass | `00` |
 | Middle | `01` |
@@ -117,22 +160,56 @@ the occasional back-to-back duplicate), not just the final value.
 | Presence | `04` |
 | Volume | `05` (matches the example above) |
 
-Values are 0.0-1.0. For example, the DRIVE knob at its "5ish" position read
-`0x3F062188` ≈ 0.524, and a 40px drag upward took it to `0x3F3BA4DC` ≈ 0.733.
+Values are 0.0-1.0. `<tone>` is confirmed: the same Drive drag on Tone 2
+sends `01` there (so the earlier example with `01` was a Tone 2 edit). The
+`01 00 00 00` and `10 3F` fields are still unknown. Inside the EffectDump,
+parameters are stored as `<idx u16> 10 3F <f32>` too (see below).
 
-**Open:** the example above has `01` at offset 0x0C where Gearbox sent `00`.
-That byte might select Tone 1/Tone 2 (all of these captures were on Tone 1),
-but this is unconfirmed. The meaning of `10 3F` after `idx`, and of the
-`0A 40 01 03` block, is also unknown.
+### EffectDump: layout at the top level (confirmed)
+
+`02`/`00` with slot `0x10` got a 4104-byte `01`/`01` reply: an 8-byte
+header, then 4096 bytes. **Those 4096 bytes are exactly Tone 1's 2048-byte
+block followed by Tone 2's 2048-byte block.** They match, byte for byte,
+the two `02`/`04` pushes Gearbox sends when it loads the patch (12-byte
+header + 2048).
+
+Offsets inside a 2048-byte tone block:
+
+| Offset | Field | Evidence |
+|---|---|---|
+| `0x000` | Tone name, ASCII, space-padded (16 bytes?) | "Sweetly Broken", "Misfit Toys-FX" |
+| `0x0E4` | Amp model ID (u8) | Line 6 Class A `06`, 1953 Small Tweed `11`, 1958 Tweed B-Man `12`, 1965 Double Verb `15` (internal IDs, not menu order) |
+| `0x0F4`-`0x11F` | Amp knobs as six `<idx> 10 3F <f32>` records | reset to per-model defaults when the amp model changes |
+| `0x170` | Cab model ID (u8) | 1x12 Line 6 `05`, 1x12 1953 Small Tweed `06`, 1x12 1964 Blackface 'Lux `07`, 2x12 1965 Blackface `0B`, 4x10 1958 Tweed B-Man `10`. Guitar cabs look like 1-based menu order |
+
+Changing the amp or cab model does **not** use a parameter set: Gearbox
+re-pushes the whole tone block (`02`/`04`), and the POD acks it with
+`02`/`03`. That is the write path for anything the int/float sets can't
+reach.
+
+### Patch load / read sequences
+
+- **Load a patch** (double-click in the Hardware Memory window): `27`
+  (select slot), push Tone 1 block, push Tone 2 block, `20` (select
+  Tone 1), then `21` queries. Gearbox pushes its **cached** copy; nothing
+  is read from the POD.
+- **GET SELECTED**: `00` (request dump, slot) -> 4104-byte `01` reply,
+  then the same load sequence as above using the fresh data.
+
+Continuation packets of these multi-packet messages have flags `04` at
+packet offset 2, and a byte at packet offset 1 that varies with no
+obvious pattern (`42`, `53`, `0F`, `F7`, ...), which is still unknown.
 
 ## What's genuinely unknown
 
-1. **EffectDump internal byte layout.** We can read/write the whole 4096-byte
-   blob, but don't know which bytes encode which effect model, which
-   parameter, or the patch name. This blocks "build a patch from scratch" /
+1. **EffectDump internal byte layout, beyond the fields above.** The
+   top-level split (two 2048-byte tone blocks), the tone name, the amp and
+   cab model IDs, and the amp knobs are known. The effect-block models and
+   parameters are not yet mapped. This blocks "build a patch from scratch" /
    "rename a patch" style editing (it does *not* block backup/restore/swap,
    which only needs the blob to be opaque).
-2. **Full parameter index catalogue.** Only tone volume is confirmed. Every
+2. **Full parameter index catalogue.** Amp knobs and block on/off are
+   confirmed (above). Every
    other knob (amp model, cab model, per-effect parameters, EQ, etc.) needs
    its index and value encoding discovered.
 3. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
