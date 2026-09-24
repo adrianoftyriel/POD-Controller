@@ -108,7 +108,7 @@ bytes look like source/destination addresses.
 |---|---|---|---|
 | `04` | `13` | host->POD | int parameter set |
 | `06` | `15` | host->POD | float parameter set |
-| `05` | `16` | host->POD | sent in pairs on tone switch, value 0/1 per tone (focus flags?) |
+| `05` | `16` | host->POD | **tone-level float set**: `<tone u32> 01 00 00 00 <param u32> <f32>` (see below) |
 | `04` | `20` | host->POD | select tone for editing (value = tone index) |
 | `02` | `21` | host->POD | query (arg `03`, `07` seen, meaning unknown) |
 | `04` | `22` | POD->host | answer to `21` |
@@ -192,6 +192,24 @@ sub `0x14` for the same slot/group, value `0`, once per step. It is
 probably "tempo sync off" (the panels have an FX TEMPO on/off button).
 Unconfirmed.
 
+### Tone-level and global controls
+
+Tone-level controls use `05`/`16`:
+
+```
+05 00 0A 40 01 03 00 16 <tone u32> 01 00 00 00 <param u32> <f32 LE>
+```
+
+| param | Control | Stored at (tone header) |
+|---|---|---|
+| `0x20` | Studio/Direct mix slider, per tone | `0x3C` |
+| `0x24` | "tone selected" flag, sent as a pair (0/1) on a tone switch | ? |
+| `0x25` | Tone 1+2 vol trim, dB (sent with tone 0) | tone 1 `0x60` |
+
+MONITOR is not part of the tone. It uses a different route:
+`02 00 04 41 04 00 13 00 <f32>` (0.0-1.0). It also doesn't appear in the
+written patch.
+
 ### EffectDump layout (confirmed)
 
 `02`/`00` with slot `0x10` got a 4104-byte `01`/`01` reply: an 8-byte
@@ -252,8 +270,10 @@ probably left over from a previous model. The unit accepts them.
 |---|---|---|
 | `0x00` | Tone name, ASCII, space-padded, 16 bytes | all tones |
 | `0x28`-`0x29` | two values 0-127 (`43 7F`, `47 64`, `0E 7F`...) | meaning unknown |
+| `0x3C` | f32, **Studio/Direct mix** (tone-level param `0x20`), about -1..1, 0 = centre | PUT diff |
 | `0x38` | f32, **likely tempo in BPM**: 120.0 on untouched tones, 118.6 on 8D, and the mod/delay panels show "FX TEMPO 118.6" | 8 tones + screen |
 | `0x40` | a `10 3F` float record (idx 0) | meaning unknown |
+| `0x60` | f32, **Tone 1+2 vol trim in dB** (param `0x25`), tone 1 only | PUT diff, -4.5 on 8D |
 | `0xD4`-`0xD5` | copy of `0x28`-`0x29`, tone 1 only. **Gearbox zeroes it when writing** | 8D before/after PUT |
 
 Model IDs are in the amp record (`+0x00` at tone offset `0x0E4`) and the
@@ -295,9 +315,9 @@ obvious pattern (`42`, `53`, `0F`, `F7`, ...), which is still unknown.
 1. **Knob maps for other effect models.** The knob map above covers the
    models loaded on 8D. Other models (and their `u` real-unit ranges)
    need the same knob sweep, run with each model loaded.
-2. **The rest of the tone header** (0x00-0xE3): inputs, pedal/tweak
-   assignments, the `0x28` pair and the `0x40` record are unmapped. Only the
-   name and the (likely) tempo are identified.
+2. **The rest of the tone header** (0x00-0xE3): inputs, pedal/tweak/
+   footswitch assignments, outputs, the `0x28` pair and the `0x40` record
+   are unmapped. Name, mix, vol trim and (likely) tempo are identified.
 3. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
    independent of USB. Line6 publishes an official MIDI CC chart for X3
    Live, but per `pod-ui` maintainer `arteme` (issue #70), full SysEx
