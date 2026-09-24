@@ -52,9 +52,9 @@ Every bulk packet (max 64 bytes) starts with a 4-byte header:
 
 ```
 byte 0: ContentsLength
-byte 1: ?? (unconfirmed)
+byte 1: 00 from the POD; junk from Gearbox (probably unused, see below)
 byte 2: Flags — 0x01 = first packet of a message, 0x04 = continuation
-byte 3: ?? (unconfirmed)
+byte 3: as byte 1
 ```
 
 Multi-packet messages are reassembled by concatenating payloads across
@@ -371,8 +371,12 @@ this by loading a slot and toggling the gate twice before a GET
 (`tools/vm-capture/get-slot.sh`).
 
 Continuation packets of these multi-packet messages have flags `04` at
-packet offset 2, and a byte at packet offset 1 that varies with no
-obvious pattern (`42`, `53`, `0F`, `F7`, ...), which is still unknown.
+packet offset 2. Packet offsets 1 and 3 are **probably unused**: every
+POD->host packet (500+ captured) has `00` there, and Gearbox's values look
+like stale buffer contents. Two amp-change pushes with different payloads
+carried the identical byte-1 sequence `42 53 54 48 4C 48 40 3C`, so it is
+not a checksum or length. A host implementation should send `00` and
+treat this as confirmed once the POD accepts it.
 
 ## What's genuinely unknown
 
