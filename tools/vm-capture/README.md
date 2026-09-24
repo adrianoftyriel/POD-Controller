@@ -69,10 +69,38 @@ steps for another tone.
 Model menus: AMP MODEL (290,221) and CAB MODEL (600,221) open a menu, then a
 "Guitar ... Models" submenu. See `actions/amp-model-*.steps` and
 `actions/cab-*.steps` for the hover path that keeps the submenu open. The
-Hardware Memory window (patch slots) sits behind the GearBox window. Double-click a
-slot's channel letter to load it (a single click only selects it).
-GET SELECTED asks for a Yes/No confirmation first. Avoid PUT and SAVE in
-automated runs, because they overwrite patches stored on the unit.
+effect panel's EFFECT MODEL field is at (350,437).
+
+### Guest display and the patch list
+
+The guest runs at **1280x1024** so the Hardware Memory window (patch list)
+shows all 16 banks: bank `b` channel `c` (A=0..D=3) has its channel
+letter at x=57 (banks 1-8) or x=476 (9-16), y = 95 + ((b-1) % 8)·82 + c·18.
+The main GearBox window keeps its position, so the coordinates above
+still apply. The patch list sits on top of the main window, so use
+`./focus.sh <vmid> main|hw` (it Alt-Tabs, and `front.py` checks the patch
+list's title bar colour) before clicking in either one.
+
+- Double-click a channel letter to load that patch (a single click only
+  selects it; clicking a tone cell selects just that tone, which GET/PUT
+  ignore).
+- **GET/PUT are only enabled while the active patch is edited** (italic),
+  and then only act on that patch. `./get-slot.sh <vmid> <bank> <A-D>`
+  handles it: load, toggle the gate twice, GET SELECTED, confirm, and save
+  `captures/dumps/<slot>.bin`.
+- GET/PUT dialogs: Yes is at (730,570) for GET and (735,570) for PUT.
+- **PUT writes to the POD. Only use it on bank 8 slots**, which the owner
+  has cleared for overwriting. The originals are backed up on the host in
+  `/root/pod-bank8-backup-2026-09-24/`.
+
+### Analysis helpers
+
+- `msgs.py <capture-dir> [--dump-dir DIR]`: reassemble a capture's bulk
+  payloads into messages. With `--dump-dir` it also saves every EffectDump
+  reply as `<slot>.bin`.
+- `parse_tone.py <dump.bin>...`: print both tones' 12 block records
+  (slot/group, model, enabled, params) from a 4096-byte dump.
+- `vmctl.py <vmid> type <text>` types printable ASCII (US layout).
 
 ### Manual
 

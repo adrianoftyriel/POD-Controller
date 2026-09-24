@@ -18,6 +18,7 @@ Usage:
   vmctl.py <vmid> wheel <x> <y> <up|down> [count]
   vmctl.py <vmid> move <x> <y>
   vmctl.py <vmid> key <qcode>[+<qcode>...]     e.g. key ret, key ctrl+s
+  vmctl.py <vmid> type <text...>               US layout, printable ASCII
   vmctl.py <vmid> steps <file>                 one command per line, see below
 
 A steps file holds one of the commands above per line (without the vmid),
@@ -136,6 +137,27 @@ class QMP:
         keys = [{"type": "qcode", "data": k} for k in combo.split("+")]
         self.cmd("send-key", keys=keys)
 
+    def type(self, text):
+        for c in text:
+            self.key(QCODES[c])
+            time.sleep(0.03)
+
+
+# Printable ASCII -> QEMU qcode combos, US keyboard layout.
+QCODES = {c: c for c in "abcdefghijklmnopqrstuvwxyz0123456789"}
+QCODES.update({c.upper(): "shift+" + c for c in "abcdefghijklmnopqrstuvwxyz"})
+_PLAIN = {" ": "spc", "-": "minus", "=": "equal", "[": "bracket_left",
+          "]": "bracket_right", "\\": "backslash", ";": "semicolon",
+          "'": "apostrophe", "`": "grave_accent", ",": "comma", ".": "dot",
+          "/": "slash"}
+_SHIFTED = {"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6",
+            "&": "7", "*": "8", "(": "9", ")": "0", "_": "minus", "+": "equal",
+            "{": "bracket_left", "}": "bracket_right", "|": "backslash",
+            ":": "semicolon", '"': "apostrophe", "~": "grave_accent",
+            "<": "comma", ">": "dot", "?": "slash"}
+QCODES.update(_PLAIN)
+QCODES.update({c: "shift+" + k for c, k in _SHIFTED.items()})
+
 
 def parse_ppm(data):
     # P6 binary PPM as written by QEMU's screendump.
@@ -208,6 +230,8 @@ def run(q, argv):
         q.move(*ints(2))
     elif op == "key":
         q.key(args[0])
+    elif op == "type":
+        q.type(" ".join(args))
     elif op == "sleep":
         time.sleep(float(args[0]))
     elif op == "steps":

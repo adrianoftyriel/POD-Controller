@@ -1,0 +1,3 @@
+# Hardware Memory window: GET ALL (read all 64 patches from the POD)
+click 328 39
+sleep 2

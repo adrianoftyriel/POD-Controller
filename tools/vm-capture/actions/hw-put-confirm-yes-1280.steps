@@ -1,0 +1,2 @@
+# Confirm "Yes" on the PUT overwrite dialog (1280x1024 layout): WRITES the selected patch to the POD
+click 735 570

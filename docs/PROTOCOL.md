@@ -113,10 +113,11 @@ bytes look like source/destination addresses.
 | `02` | `21` | host->POD | query (arg `03`, `07` seen, meaning unknown) |
 | `04` | `22` | POD->host | answer to `21` |
 | `02` | `00` | host->POD | **request EffectDump**, u32 arg = slot |
+| `02` | `02` | host->POD | **write patch to memory**: u32 slot + 4096-byte EffectDump (4108 bytes; byte +1 = `04`) |
 | `01` | `01` | POD->host | **EffectDump** reply (4104 bytes) |
 | `02` | `04` | host->POD | push one tone's 2048-byte block into the edit buffer |
 | `02` | `27` | host->POD | select patch slot, u32 arg = slot |
-| `02` | `03` | POD->host | ack for `04` pushes |
+| `02` | `03` | POD->host | ack for `02` writes and `04` pushes |
 
 Slot numbering is `(bank-1)*4 + channel`, with A=0..D=3 (5A = `0x10`).
 
@@ -165,22 +166,65 @@ sends `01` there (so the earlier example with `01` was a Tone 2 edit). The
 `01 00 00 00` and `10 3F` fields are still unknown. Inside the EffectDump,
 parameters are stored as `<idx u16> 10 3F <f32>` too (see below).
 
-### EffectDump: layout at the top level (confirmed)
+### EffectDump layout (confirmed)
 
 `02`/`00` with slot `0x10` got a 4104-byte `01`/`01` reply: an 8-byte
 header, then 4096 bytes. **Those 4096 bytes are exactly Tone 1's 2048-byte
 block followed by Tone 2's 2048-byte block.** They match, byte for byte,
 the two `02`/`04` pushes Gearbox sends when it loads the patch (12-byte
-header + 2048).
+header + 2048). The same 4096 bytes are what `02`/`02` writes.
 
-Offsets inside a 2048-byte tone block:
+**A tone block is a 0xE4-byte header followed by 12 block records of 0x8C
+(140) bytes each.** 0xE4 + 12 × 0x8C = 0x800. This holds for all 10 tones
+decoded so far (5A and all of bank 8), and `tools/vm-capture/parse_tone.py`
+parses them.
+
+#### Block record (0x8C bytes)
+
+```
++0x00  model      u16   index into the table picked by +0x02 (docs/MODELS.md)
++0x02  table      u8    02 delay, 03 mod, 04 reverb, 05 stomp (dist), 06 wah,
+                        07 volume, 0A stomp (filter/synth), 0B gate/comp/loop,
+                        0C EQ. Amp and cab records have 02 here too.
++0x03  category   u8    00 amp, 01 cab, 02 effect
++0x04  slot       u16   chain position, same values as the live int-set address
++0x06  group      u16   02 = pre-amp, 03 = amp section, 05 = post-amp
++0x08  enabled    u8    0/1 (the live block on/off int set writes this)
++0x09  00 00
++0x0B  count      u8    number of parameter records that follow
++0x0C  params     count × 8 bytes: <idx u16> <type u16> <value 4 bytes>
+```
+
+Record order in the tone block is fixed (amp, cab, stomp, mod, delay,
+reverb, gate, comp, EQ, wah, volume, FX loop), but **slot/group move** when
+a block is switched between pre and post. Mod shows up as slot 3/group 5
+(post) or slot 4/group 2 (pre), delay as 4/5 or 5/2, and the loop as 12/2
+or 9/5. The live int/float sets address a block by its current slot and
+group, not by record index.
+
+Parameter `type`:
+
+| type (LE bytes) | Meaning |
+|---|---|
+| `10 3F` | float 0.0-1.0 (all knobs so far, including the amp knobs) |
+| `00 3F` | float in real units. Gate threshold `0xC2680000` = -58.0 dB, matching the UI; volume pedal max `1.0` |
+| `01 3F` | a different encoding (delay/mod time, reverb pre-delay...). Unknown |
+
+Some records have stale non-zero bytes after their last parameter,
+probably left over from a previous model. The unit accepts them.
+
+#### Tone header (0x00-0xE3)
 
 | Offset | Field | Evidence |
 |---|---|---|
-| `0x000` | Tone name, ASCII, space-padded (16 bytes?) | "Sweetly Broken", "Misfit Toys-FX" |
-| `0x0E4` | Amp model ID (u8) | Line 6 Class A `06`, 1953 Small Tweed `11`, 1958 Tweed B-Man `12`, 1965 Double Verb `15` (internal IDs, not menu order) |
-| `0x0F4`-`0x11F` | Amp knobs as six `<idx> 10 3F <f32>` records | reset to per-model defaults when the amp model changes |
-| `0x170` | Cab model ID (u8) | 1x12 Line 6 `05`, 1x12 1953 Small Tweed `06`, 1x12 1964 Blackface 'Lux `07`, 2x12 1965 Blackface `0B`, 4x10 1958 Tweed B-Man `10`. Guitar cabs look like 1-based menu order |
+| `0x00` | Tone name, ASCII, space-padded, 16 bytes | all tones |
+| `0x28`-`0x29` | two values 0-127 (`43 7F`, `47 64`, `0E 7F`...) | meaning unknown |
+| `0x38` | f32, **likely tempo in BPM**: 120.0 on untouched tones, 118.6 on 8D, and the mod/delay panels show "FX TEMPO 118.6" | 8 tones + screen |
+| `0x40` | a `10 3F` float record (idx 0) | meaning unknown |
+| `0xD4`-`0xD5` | copy of `0x28`-`0x29`, tone 1 only. **Gearbox zeroes it when writing** | 8D before/after PUT |
+
+Model IDs are in the amp record (`+0x00` at tone offset `0x0E4`) and the
+cab record (tone offset `0x170`), matching the offsets found earlier.
 
 Changing the amp or cab model does **not** use a parameter set: Gearbox
 re-pushes the whole tone block (`02`/`04`), and the POD acks it with
@@ -195,6 +239,19 @@ reach.
   is read from the POD.
 - **GET SELECTED**: `00` (request dump, slot) -> 4104-byte `01` reply,
   then the same load sequence as above using the fresh data.
+- **PUT SELECTED** (write, tested on 8D): `02`/`02` = slot `0x1F` + the
+  4096-byte patch -> `02`/`03` ack, then the load sequence. **Verified by
+  reading 8D back:** the stored dump equals the written bytes exactly.
+  Gearbox re-serializes the patch on the way out, though: besides the
+  intended change, it cleared tone header `0xD4`-`0xD5` and added a default
+  parameter record to one block. So a write is "Gearbox's model of the
+  patch", not "device copy + one change".
+
+Gearbox only enables GET/PUT while its copy of the **active** patch differs
+from the hardware (the patch name is shown in italics), and GET ALL / GET
+SELECTED then only fetch that one patch. The capture tooling works around
+this by loading a slot and toggling the gate twice before a GET
+(`tools/vm-capture/get-slot.sh`).
 
 Continuation packets of these multi-packet messages have flags `04` at
 packet offset 2, and a byte at packet offset 1 that varies with no
@@ -202,16 +259,14 @@ obvious pattern (`42`, `53`, `0F`, `F7`, ...), which is still unknown.
 
 ## What's genuinely unknown
 
-1. **EffectDump internal byte layout, beyond the fields above.** The
-   top-level split (two 2048-byte tone blocks), the tone name, the amp and
-   cab model IDs, and the amp knobs are known. The effect-block models and
-   parameters are not yet mapped. This blocks "build a patch from scratch" /
-   "rename a patch" style editing (it does *not* block backup/restore/swap,
-   which only needs the blob to be opaque).
-2. **Full parameter index catalogue.** Amp knobs and block on/off are
-   confirmed (above). Every
-   other knob (amp model, cab model, per-effect parameters, EQ, etc.) needs
-   its index and value encoding discovered.
+1. **What each effect parameter `idx` means.** The record structure and
+   the model tables are known, but which knob a given `idx` is (and the
+   ranges of the `00 3F` / `01 3F` types) still has to be mapped per model.
+   Turning each effect knob in Gearbox gives this directly, because float
+   sets use the same `idx`.
+2. **The rest of the tone header** (0x00-0xE3): inputs, pedal/tweak
+   assignments, the `0x28` pair and the `0x40` record are unmapped. Only the
+   name and the (likely) tempo are identified.
 3. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
    independent of USB. Line6 publishes an official MIDI CC chart for X3
    Live, but per `pod-ui` maintainer `arteme` (issue #70), full SysEx
@@ -234,6 +289,10 @@ which is the fastest way to map live parameters. For the EffectDump layout,
    that control.
 5. Record the finding in this document, with the exact steps and byte
    offset/encoding.
+
+The full-tone pushes and dumps are now the quickest way to do this: change
+one thing in Gearbox, and the tone block it pushes can be diffed against
+the previous one (`parse_tone.py` for structure).
 
 This requires the physical POD X3 connected via USB to a machine running the
 probe tooling in `crates/pod-core` — no Gearbox or Windows VM needed for
