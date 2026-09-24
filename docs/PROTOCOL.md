@@ -51,7 +51,7 @@ After this handshake, normal operation moves to the bulk endpoints.
 Bulk data is a stream of **chunks**, each a 4-byte header plus up to 252
 (`0xFC`) bytes of payload, so at most 256 bytes. The chunks are carried in
 64-byte USB packets and can span several of them. (Confirmed from
-captures: a 4108-byte patch write is 16 chunks of `0xFC` + one of `0x44`,
+captures: a 4108-byte patch write is 16 chunks of `0xFC` + one of `0x4C` (4032 + 76),
 and `ContentsLength` is the chunk's own payload length.)
 
 ```
