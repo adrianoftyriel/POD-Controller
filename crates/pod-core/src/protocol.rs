@@ -2,6 +2,8 @@
 //! channel. Everything here is sourced from `docs/PROTOCOL.md` — keep that
 //! file and this module in sync as more of the protocol is discovered.
 
+use crate::error::{PodError, Result};
+
 /// Line6's USB vendor ID.
 pub const VENDOR_ID: u16 = 0x0E41;
 /// POD X3 (rack/desktop) product ID.
@@ -22,6 +24,15 @@ pub const BULK_PACKET_LEN: usize = 64;
 /// serial/firmware, and the still-unexplained 0xF000-0xF080 probe reads).
 /// Named `L6_X3_CTRL` in prior art (andree182/podx3).
 pub const CTRL_REQUEST: u8 = 0x67;
+
+/// Size of a decoded EffectDump (patch) blob, in bytes.
+pub const EFFECT_DUMP_LEN: usize = 4096;
+
+/// Channel byte used in the 4-byte "route" field of the common message
+/// header for live parameter edits (the currently-loaded patch).
+pub const CHANNEL_LIVE: u8 = 0x01;
+/// Channel byte used for patch-memory traffic: slot select, dump push/read.
+pub const CHANNEL_PATCH: u8 = 0x02;
 
 /// Message type byte (first byte of a reassembled bulk message payload).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +63,49 @@ impl MessageType {
     }
 }
 
-/// The 4-byte header prepended to every bulk packet.
+/// ConfigCmd (`0x02`) subcommand bytes — see docs/PROTOCOL.md "Confirmed
+/// from real Gearbox traffic".
+pub mod config_cmd {
+    /// host->POD: request EffectDump, u32 arg = slot.
+    pub const REQUEST_DUMP: u8 = 0x00;
+    /// host->POD: write patch to memory, u32 slot + 4096-byte EffectDump.
+    pub const WRITE_DUMP: u8 = 0x02;
+    /// POD->host: ack for `WRITE_DUMP` writes and per-tone pushes.
+    pub const ACK: u8 = 0x03;
+    /// host->POD: select patch slot, u32 arg = slot.
+    pub const SELECT_SLOT: u8 = 0x27;
+    /// POD->host: EffectDump reply subcommand (message type is `0x01`, not
+    /// `0x02`, but it shares the same "sub" header position).
+    pub const EFFECT_DUMP_REPLY: u8 = 0x01;
+}
+
+/// Int-set (`0x04`) subcommand bytes for messages shaped like
+/// `<tone u32> <slot u16> <group u16> <value u32>` — see docs/PROTOCOL.md
+/// "Int set (04/13): block on/off" and the sync/move rows below it.
+pub mod int_set {
+    /// Block on/off. Value: 0 = off, 1 = on.
+    pub const BLOCK_ENABLED: u8 = 0x13;
+    /// Tempo-sync division for a block (0 = off).
+    pub const TEMPO_SYNC: u8 = 0x14;
+}
+
+/// Float-set (`0x06`) subcommand byte for messages shaped like
+/// `<tone u32> <slot u16> <group u16> 01 00 00 00 <idx u16> <namespace u16> <f32>`.
+pub const FLOAT_SET_SUB: u8 = 0x15;
+
+/// Parameter namespace values (the `<idx u16> <namespace u16>` key that
+/// identifies a parameter, stored little-endian as `<lo> <hi>` bytes in
+/// captures) — see docs/PROTOCOL.md "Parameter records".
+pub mod namespace {
+    /// Normal knobs, 0.0-1.0.
+    pub const NORMAL: u16 = 0x3F10;
+    /// The Mix knob of mod/delay/reverb/loop, 0.0-1.0.
+    pub const MIX: u16 = 0x3F01;
+    /// Real units (dB, position, etc.) rather than a normalized 0.0-1.0.
+    pub const REAL_UNITS: u16 = 0x3F00;
+}
+
+/// The 4-byte header prepended to every bulk chunk.
 #[derive(Debug, Clone, Copy)]
 pub struct PacketHeader {
     pub contents_length: u8,
@@ -74,6 +127,102 @@ impl PacketHeader {
     }
 }
 
+/// Max payload bytes carried by one chunk (see docs/PROTOCOL.md "Bulk
+/// transfer framing").
+pub const CHUNK_MAX_PAYLOAD: usize = 0xFC;
+/// Bytes in a chunk header.
+pub const CHUNK_HEADER_LEN: usize = 4;
+
+/// Split a complete message into chunk-framed bytes (4-byte header + up to
+/// [`CHUNK_MAX_PAYLOAD`] bytes of payload per chunk), concatenated and ready
+/// for a single bulk OUT transfer — the USB layer fragments that transfer
+/// into 64-byte wire packets on its own, so callers don't need to chunk at
+/// that level.
+///
+/// The exact-multiple-of-[`CHUNK_MAX_PAYLOAD`]-bytes edge case (whether a
+/// trailing zero-length chunk is needed to terminate the message) is
+/// unconfirmed against real hardware — every capture seen so far ends on a
+/// short chunk.
+pub fn encode_chunks(message: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        message.len() + CHUNK_HEADER_LEN * (message.len() / CHUNK_MAX_PAYLOAD + 1),
+    );
+    let mut offset = 0;
+    let mut first = true;
+    loop {
+        let take = (message.len() - offset).min(CHUNK_MAX_PAYLOAD);
+        out.push(take as u8);
+        out.push(0x00);
+        out.push(if first { FLAG_FIRST } else { FLAG_CONTINUATION });
+        out.push(0x00);
+        out.extend_from_slice(&message[offset..offset + take]);
+        offset += take;
+        first = false;
+        if offset >= message.len() {
+            break;
+        }
+    }
+    out
+}
+
+/// Reassembles a stream of raw bulk-IN packets (of any size — typically
+/// [`BULK_PACKET_LEN`]-byte reads) into complete protocol messages, per the
+/// chunk framing in docs/PROTOCOL.md: a message is one or more chunks (a
+/// 4-byte header + up to [`CHUNK_MAX_PAYLOAD`] bytes of payload each), and
+/// chunk boundaries are not aligned to raw packet boundaries. A chunk
+/// shorter than [`CHUNK_MAX_PAYLOAD`] terminates the message.
+#[derive(Default)]
+pub struct ChunkReassembler {
+    raw: Vec<u8>,
+    pos: usize,
+    message: Vec<u8>,
+}
+
+impl ChunkReassembler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one raw bulk-IN read. Returns `Some(payload)` once a full
+    /// message has been reassembled.
+    pub fn push(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.raw.extend_from_slice(packet);
+        loop {
+            if self.raw.len() - self.pos < CHUNK_HEADER_LEN {
+                return Ok(None);
+            }
+            let header = PacketHeader::parse(&self.raw[self.pos..]).expect("length checked above");
+            let contents_length = header.contents_length as usize;
+            let body_start = self.pos + CHUNK_HEADER_LEN;
+            let body_end = body_start + contents_length;
+            if self.raw.len() < body_end {
+                return Ok(None);
+            }
+
+            if header.flags & FLAG_FIRST != 0 {
+                self.message.clear();
+            }
+            self.message
+                .extend_from_slice(&self.raw[body_start..body_end]);
+            self.pos = body_end;
+
+            if contents_length < CHUNK_MAX_PAYLOAD {
+                let msg = std::mem::take(&mut self.message);
+                self.raw.drain(..self.pos);
+                self.pos = 0;
+                return Ok(Some(msg));
+            }
+            // Full-size chunk: more chunks follow for this same message.
+        }
+    }
+}
+
+/// Builds the 8-byte common message header shared by ConfigCmd/int/float
+/// messages (see docs/PROTOCOL.md "Common message header").
+fn common_header(msg_type: u8, byte1: u8, channel: u8, subcommand: u8) -> [u8; 8] {
+    [msg_type, byte1, 0x0A, 0x40, channel, 0x03, 0x00, subcommand]
+}
+
 /// Confirmed-working template for a float parameter set message (tone
 /// volume, parameter index 5), captured verbatim from a real device
 /// interaction. Bytes at [`FLOAT_PARAM_INDEX_OFFSET`] (index) and the
@@ -81,8 +230,8 @@ impl PacketHeader {
 /// other parameter's index and byte layout is still undiscovered — see
 /// `docs/PROTOCOL.md` "What's genuinely unknown".
 const FLOAT_PARAM_TEMPLATE: [u8; 24] = [
-    0x06, 0x00, 0x0A, 0x40, 0x01, 0x03, 0x00, 0x15, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
-    0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x10, 0x3F,
+    0x06, 0x00, 0x0A, 0x40, 0x01, 0x03, 0x00, 0x15, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x10, 0x3F,
 ];
 
 /// Offset within the float-param payload (after the 4-byte bulk header)
@@ -95,58 +244,139 @@ pub const FLOAT_PARAM_INDEX_OFFSET: usize = 20;
 /// `param_index` and `value` are only confirmed correct for the one known
 /// case (index 5 = tone volume, value range 0.0-1.0). Using other indices
 /// is speculative until confirmed against real hardware and recorded in
-/// `docs/PROTOCOL.md`.
+/// `docs/PROTOCOL.md`. Prefer [`encode_float_set`] for parameters whose
+/// full `(tone, slot, group, idx, namespace)` address is known.
 pub fn encode_float_param(param_index: u8, value: f32) -> Vec<u8> {
     let mut payload = FLOAT_PARAM_TEMPLATE.to_vec();
     payload[FLOAT_PARAM_INDEX_OFFSET] = param_index;
     payload.extend_from_slice(&value.to_le_bytes());
-
-    let mut packet = Vec::with_capacity(4 + payload.len());
-    packet.push(payload.len() as u8);
-    packet.push(0x00);
-    packet.push(FLAG_FIRST);
-    packet.push(0x00);
-    packet.extend_from_slice(&payload);
-    packet
+    encode_chunks(&payload)
 }
 
-/// Reassembles bulk packets (each carrying a [`PacketHeader`]) into
-/// complete message payloads.
-#[derive(Default)]
-pub struct PacketReassembler {
-    buffer: Vec<u8>,
-    expected_len: Option<usize>,
+/// Build a live float-parameter-set message (type `0x06`, sub `0x15`) — the
+/// "knob turned" message for float-valued parameters (amp knobs, effect
+/// knobs, etc.). See docs/PROTOCOL.md "Float set (06/15)".
+///
+/// `slot`/`group` address the target block at its *current* chain
+/// position (this can move when a block is switched pre/post-amp — it is
+/// not a fixed per-model constant). `idx`/`namespace` identify the
+/// parameter within that block (see docs/KNOBS.md and the effect knob map
+/// in docs/PROTOCOL.md).
+pub fn encode_float_set(
+    tone: u8,
+    slot: u16,
+    group: u16,
+    idx: u16,
+    namespace: u16,
+    value: f32,
+) -> Vec<u8> {
+    let mut message = common_header(
+        MessageType::FloatParam as u8,
+        0x00,
+        CHANNEL_LIVE,
+        FLOAT_SET_SUB,
+    )
+    .to_vec();
+    message.extend_from_slice(&(tone as u32).to_le_bytes());
+    message.extend_from_slice(&slot.to_le_bytes());
+    message.extend_from_slice(&group.to_le_bytes());
+    message.extend_from_slice(&1u32.to_le_bytes()); // constant; meaning unknown
+    message.extend_from_slice(&idx.to_le_bytes());
+    message.extend_from_slice(&namespace.to_le_bytes());
+    message.extend_from_slice(&value.to_le_bytes());
+    encode_chunks(&message)
 }
 
-impl PacketReassembler {
-    pub fn new() -> Self {
-        Self::default()
+/// Build a live int-parameter-set message (type `0x04`) — used for block
+/// on/off (`sub = `[`int_set::BLOCK_ENABLED`]), tempo sync
+/// (`sub = `[`int_set::TEMPO_SYNC`]), and other messages shaped like
+/// `<tone u32> <slot u16> <group u16> <value u32>`. See docs/PROTOCOL.md
+/// "Int set (04/13): block on/off".
+pub fn encode_int_set(tone: u8, sub: u8, slot: u16, group: u16, value: u32) -> Vec<u8> {
+    let mut message =
+        common_header(MessageType::IntParam12 as u8, 0x00, CHANNEL_LIVE, sub).to_vec();
+    message.extend_from_slice(&(tone as u32).to_le_bytes());
+    message.extend_from_slice(&slot.to_le_bytes());
+    message.extend_from_slice(&group.to_le_bytes());
+    message.extend_from_slice(&value.to_le_bytes());
+    encode_chunks(&message)
+}
+
+/// Build a ConfigCmd message requesting the EffectDump for `slot` — see
+/// docs/PROTOCOL.md "02/00: request EffectDump". The reply is decoded with
+/// [`decode_effect_dump`].
+pub fn encode_request_dump(slot: u8) -> Vec<u8> {
+    let mut message = common_header(
+        MessageType::ConfigCmd as u8,
+        0x00,
+        CHANNEL_PATCH,
+        config_cmd::REQUEST_DUMP,
+    )
+    .to_vec();
+    message.extend_from_slice(&(slot as u32).to_le_bytes());
+    encode_chunks(&message)
+}
+
+/// Build a ConfigCmd message making `slot` the active/live patch — see
+/// docs/PROTOCOL.md "02/27: select patch slot". Unlike parameter sets, no
+/// reply is documented for this message; treat it as fire-and-forget like
+/// block on/off.
+pub fn encode_select_slot(slot: u8) -> Vec<u8> {
+    let mut message = common_header(
+        MessageType::ConfigCmd as u8,
+        0x00,
+        CHANNEL_PATCH,
+        config_cmd::SELECT_SLOT,
+    )
+    .to_vec();
+    message.extend_from_slice(&(slot as u32).to_le_bytes());
+    encode_chunks(&message)
+}
+
+/// Build a ConfigCmd message writing `patch` (a raw, opaque EffectDump
+/// blob) to `slot` — see docs/PROTOCOL.md "02/02: write patch to memory".
+/// `patch` must be exactly [`EFFECT_DUMP_LEN`] bytes.
+pub fn encode_write_dump(slot: u8, patch: &[u8]) -> Result<Vec<u8>> {
+    if patch.len() != EFFECT_DUMP_LEN {
+        return Err(PodError::Protocol(format!(
+            "patch data must be exactly {EFFECT_DUMP_LEN} bytes, got {}",
+            patch.len()
+        )));
     }
+    // Byte +1 is 0x04 for this message specifically (documented exception
+    // to the usual 0x00) — see docs/PROTOCOL.md.
+    let mut message = common_header(
+        MessageType::ConfigCmd as u8,
+        0x04,
+        CHANNEL_PATCH,
+        config_cmd::WRITE_DUMP,
+    )
+    .to_vec();
+    message.extend_from_slice(&(slot as u32).to_le_bytes());
+    message.extend_from_slice(patch);
+    Ok(encode_chunks(&message))
+}
 
-    /// Feed one raw bulk-IN packet. Returns `Some(payload)` once a full
-    /// message has been reassembled.
-    pub fn push(&mut self, packet: &[u8]) -> crate::error::Result<Option<Vec<u8>>> {
-        let header = PacketHeader::parse(packet).ok_or_else(|| {
-            crate::error::PodError::Protocol("bulk packet shorter than 4-byte header".into())
-        })?;
-        let body = &packet[4..];
-
-        if header.flags & FLAG_FIRST != 0 {
-            self.buffer.clear();
-            self.expected_len = Some(header.contents_length as usize);
-        }
-
-        self.buffer.extend_from_slice(body);
-
-        if let Some(expected) = self.expected_len {
-            if self.buffer.len() >= expected {
-                self.buffer.truncate(expected);
-                self.expected_len = None;
-                return Ok(Some(std::mem::take(&mut self.buffer)));
-            }
-        }
-        Ok(None)
+/// Parse a reassembled EffectDump reply (type `0x01`, sub `0x01`): an
+/// 8-byte header followed by [`EFFECT_DUMP_LEN`] bytes of opaque patch data.
+/// `message` is a full message as returned by [`ChunkReassembler`] (chunk
+/// framing already stripped).
+pub fn decode_effect_dump(message: &[u8]) -> Result<&[u8]> {
+    const HEADER_LEN: usize = 8;
+    if message.len() != HEADER_LEN + EFFECT_DUMP_LEN {
+        return Err(PodError::Protocol(format!(
+            "expected {}-byte EffectDump reply, got {} bytes",
+            HEADER_LEN + EFFECT_DUMP_LEN,
+            message.len()
+        )));
     }
+    if message[0] != MessageType::EffectDump as u8 || message[7] != config_cmd::EFFECT_DUMP_REPLY {
+        return Err(PodError::Protocol(format!(
+            "expected EffectDump reply (type=0x01 sub=0x01), got type={:#04x} sub={:#04x}",
+            message[0], message[7]
+        )));
+    }
+    Ok(&message[HEADER_LEN..])
 }
 
 #[cfg(test)]
@@ -165,10 +395,137 @@ mod tests {
     }
 
     #[test]
-    fn reassembler_handles_single_packet_message() {
-        let mut r = PacketReassembler::new();
+    fn encode_float_set_matches_encode_float_param_for_the_confirmed_case() {
+        // Tone 2 (index8 = 1 in the confirmed template), amp volume knob.
+        assert_eq!(
+            encode_float_set(1, 0x0000, 0x0003, 5, namespace::NORMAL, 1.0),
+            encode_float_param(5, 1.0)
+        );
+    }
+
+    #[test]
+    fn reassembler_handles_single_chunk_message() {
+        let mut r = ChunkReassembler::new();
         let packet = encode_float_param(5, 1.0);
         let result = r.push(&packet).unwrap();
         assert_eq!(result, Some(packet[4..].to_vec()));
+    }
+
+    #[test]
+    fn encode_chunks_matches_confirmed_4108_byte_write_shape() {
+        // docs/PROTOCOL.md: "a 4108-byte patch write is 16 chunks of 0xFC
+        // plus one of 0x4C (4032 + 76)".
+        let message = vec![0xAB; 4108];
+        let framed = encode_chunks(&message);
+
+        let mut offset = 0;
+        let mut chunk_lengths = Vec::new();
+        while offset < framed.len() {
+            let header = PacketHeader::parse(&framed[offset..]).unwrap();
+            chunk_lengths.push(header.contents_length);
+            offset += CHUNK_HEADER_LEN + header.contents_length as usize;
+        }
+
+        let mut expected = vec![0xFC; 16];
+        expected.push(0x4C);
+        assert_eq!(chunk_lengths, expected);
+        assert_eq!(offset, framed.len());
+    }
+
+    #[test]
+    fn chunk_reassembler_roundtrips_multi_chunk_message_fed_as_64_byte_packets() {
+        let message: Vec<u8> = (0..4108u32).map(|i| (i % 256) as u8).collect();
+        let framed = encode_chunks(&message);
+
+        let mut reassembler = ChunkReassembler::new();
+        let mut result = None;
+        for packet in framed.chunks(BULK_PACKET_LEN) {
+            if let Some(msg) = reassembler.push(packet).unwrap() {
+                result = Some(msg);
+            }
+        }
+        assert_eq!(result, Some(message));
+    }
+
+    #[test]
+    fn chunk_reassembler_handles_feeds_not_aligned_to_packet_boundaries() {
+        let message: Vec<u8> = (0..600u32).map(|i| (i % 256) as u8).collect();
+        let framed = encode_chunks(&message);
+
+        let mut reassembler = ChunkReassembler::new();
+        let mut result = None;
+        for packet in framed.chunks(7) {
+            if let Some(msg) = reassembler.push(packet).unwrap() {
+                result = Some(msg);
+            }
+        }
+        assert_eq!(result, Some(message));
+    }
+
+    #[test]
+    fn encode_request_dump_matches_expected_bytes() {
+        let framed = encode_request_dump(0x10);
+        let expected_message: Vec<u8> = vec![
+            0x02, 0x00, 0x0A, 0x40, 0x02, 0x03, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(framed, encode_chunks(&expected_message));
+    }
+
+    #[test]
+    fn encode_select_slot_matches_expected_bytes() {
+        let framed = encode_select_slot(0x1F);
+        let expected_message: Vec<u8> = vec![
+            0x02, 0x00, 0x0A, 0x40, 0x02, 0x03, 0x00, 0x27, 0x1F, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(framed, encode_chunks(&expected_message));
+    }
+
+    #[test]
+    fn encode_write_dump_matches_expected_shape() {
+        let patch = vec![0x42; EFFECT_DUMP_LEN];
+        let framed = encode_write_dump(0x1F, &patch).unwrap();
+        let mut expected_message: Vec<u8> = vec![
+            0x02, 0x04, 0x0A, 0x40, 0x02, 0x03, 0x00, 0x02, 0x1F, 0x00, 0x00, 0x00,
+        ];
+        expected_message.extend_from_slice(&patch);
+        assert_eq!(expected_message.len(), 4108);
+        assert_eq!(framed, encode_chunks(&expected_message));
+    }
+
+    #[test]
+    fn encode_write_dump_rejects_wrong_length() {
+        let result = encode_write_dump(0, &[0u8; 100]);
+        assert!(matches!(result, Err(PodError::Protocol(_))));
+    }
+
+    #[test]
+    fn decode_effect_dump_extracts_patch_bytes() {
+        let mut message = vec![0x01, 0x04, 0x0A, 0x03, 0x02, 0x40, 0x00, 0x01];
+        let patch = vec![0x7A; EFFECT_DUMP_LEN];
+        message.extend_from_slice(&patch);
+        assert_eq!(decode_effect_dump(&message).unwrap(), patch.as_slice());
+    }
+
+    #[test]
+    fn decode_effect_dump_rejects_wrong_length() {
+        assert!(decode_effect_dump(&[0x01, 0x04, 0x0A, 0x03, 0x02, 0x40, 0x00, 0x01]).is_err());
+    }
+
+    #[test]
+    fn decode_effect_dump_rejects_wrong_type() {
+        let mut message = vec![0x02, 0x04, 0x0A, 0x03, 0x02, 0x40, 0x00, 0x01];
+        message.extend_from_slice(&[0u8; EFFECT_DUMP_LEN]);
+        assert!(decode_effect_dump(&message).is_err());
+    }
+
+    #[test]
+    fn encode_int_set_block_enabled_matches_expected_bytes() {
+        // Gate block, tone 1, slot 0x00 group 0x02, turned on.
+        let framed = encode_int_set(0, int_set::BLOCK_ENABLED, 0x00, 0x02, 1);
+        let expected_message: Vec<u8> = vec![
+            0x04, 0x00, 0x0A, 0x40, 0x01, 0x03, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x01, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(framed, encode_chunks(&expected_message));
     }
 }

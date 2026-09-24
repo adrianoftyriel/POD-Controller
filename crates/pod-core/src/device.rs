@@ -4,7 +4,8 @@ use nusb::transfer::{Buffer, Bulk, In, Out};
 use nusb::{Endpoint, MaybeFuture};
 
 use crate::error::{PodError, Result};
-use crate::protocol::{self, PacketReassembler};
+use crate::params::{AmpKnob, Block};
+use crate::protocol::{self, ChunkReassembler};
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -60,7 +61,7 @@ impl PodDevice {
     pub fn transact(&mut self, request: &[u8]) -> Result<Vec<u8>> {
         self.write_raw(request)?;
 
-        let mut reassembler = PacketReassembler::new();
+        let mut reassembler = ChunkReassembler::new();
         loop {
             let packet = self.read_raw()?;
             if let Some(payload) = reassembler.push(&packet)? {
@@ -94,5 +95,64 @@ impl PodDevice {
     pub fn set_float_param(&mut self, param_index: u8, value: f32) -> Result<()> {
         let msg = protocol::encode_float_param(param_index, value);
         self.write_raw(&msg)
+    }
+
+    /// Read the EffectDump (opaque 4096-byte patch blob) for `slot`.
+    /// Slot numbering is `(bank-1)*4 + channel`, A=0..D=3 — see
+    /// `docs/PROTOCOL.md` "Slot numbering".
+    pub fn read_patch(&mut self, slot: u8) -> Result<Vec<u8>> {
+        let request = protocol::encode_request_dump(slot);
+        let reply = self.transact(&request)?;
+        protocol::decode_effect_dump(&reply).map(|patch| patch.to_vec())
+    }
+
+    /// Write a raw, opaque EffectDump blob (as produced by [`Self::read_patch`])
+    /// to `slot`, and wait for the device's ack.
+    pub fn write_patch(&mut self, slot: u8, patch: &[u8]) -> Result<()> {
+        let message = protocol::encode_write_dump(slot, patch)?;
+        let ack = self.transact(&message)?;
+        if ack.first().copied() != Some(protocol::MessageType::ConfigCmd as u8) {
+            return Err(PodError::Protocol(format!(
+                "expected ConfigCmd ack after patch write, got {ack:02x?}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Make `slot` the active/live patch on the device. Fire-and-forget:
+    /// no reply is documented for this message.
+    pub fn select_slot(&mut self, slot: u8) -> Result<()> {
+        let message = protocol::encode_select_slot(slot);
+        self.write_raw(&message)
+    }
+
+    /// Set an amp knob on `tone` (0 or 1) of the currently loaded patch.
+    pub fn set_amp_knob(&mut self, tone: u8, knob: AmpKnob, value: f32) -> Result<()> {
+        let msg = protocol::encode_float_set(
+            tone,
+            AmpKnob::SLOT,
+            AmpKnob::GROUP,
+            knob.idx(),
+            protocol::namespace::NORMAL,
+            value,
+        );
+        self.write_raw(&msg)
+    }
+
+    /// Enable or disable `block` on `tone` (0 or 1) of the currently loaded
+    /// patch. Addresses the block at its *default* chain position — see
+    /// [`Block::slot_group`] for the caveat about blocks moved pre/post-amp.
+    pub fn set_block_enabled(&mut self, tone: u8, block: Block, enabled: bool) -> Result<()> {
+        for &(slot, group) in block.slot_group() {
+            let msg = protocol::encode_int_set(
+                tone,
+                protocol::int_set::BLOCK_ENABLED,
+                slot,
+                group,
+                enabled as u32,
+            );
+            self.write_raw(&msg)?;
+        }
+        Ok(())
     }
 }
