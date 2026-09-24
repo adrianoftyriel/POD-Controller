@@ -336,10 +336,10 @@ obvious pattern (`42`, `53`, `0F`, `F7`, ...), which is still unknown.
 1. **Knob maps for other effect models.** The knob map above covers the
    models loaded on 8D. Other models (and their `u` real-unit ranges)
    need the same knob sweep, run with each model loaded.
-2. **The rest of the tone header** (0x00-0xE3): inputs, pedal/tweak/
-   footswitch the 1/4" outputs setting, the `0x28` pair, and the `0x40` record
-   are unmapped. Name, mix, vol trim, (likely) tempo, inputs, pedal,
-   tweak and footswitch settings are identified.
+2. **The rest of the tone header** (0x00-0xE3): the 1/4" outputs setting,
+   the `0x28` pair and the `0x40` record are unmapped. Name, mix, vol
+   trim, (likely) tempo, inputs, pedal, tweak and footswitch settings are
+   identified.
 3. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
    independent of USB. Line6 publishes an official MIDI CC chart for X3
    Live, but per `pod-ui` maintainer `arteme` (issue #70), full SysEx
