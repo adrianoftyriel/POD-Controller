@@ -112,6 +112,8 @@ bytes look like source/destination addresses.
 | `04` | `20` | host->POD | select tone for editing (value = tone index) |
 | `02` | `21` | host->POD | query (arg `03`, `07` seen, meaning unknown) |
 | `04` | `22` | POD->host | answer to `21` |
+| `04` | `12` | host->POD | move block (PRE/POST): value = new `<slot u16><group u16>` |
+| `04` | `14` | host->POD | tempo-sync division for a block |
 | `02` | `00` | host->POD | **request EffectDump**, u32 arg = slot |
 | `02` | `02` | host->POD | **write patch to memory**: u32 slot + 4096-byte EffectDump (4108 bytes; byte +1 = `04`) |
 | `01` | `01` | POD->host | **EffectDump** reply (4104 bytes) |
@@ -186,6 +188,13 @@ chain slot/group. Model-specific knobs will differ for other models.
 | Delay (Tube Echo) | 4/5 | Time `0k`, Feedback `1k`, Flutter `2k`, Drive `3k`, Mix `1m` |
 | Reverb (Brite Room) | 5/5 | Decay `0k`, Pre-delay `1k`, Tone `2k`, Mix `2m` |
 | Amp | 0/3 | Bass `0k`, Middle `1k`, Treble `2k`, Drive `3k`, Presence `4k`, Volume `5k` |
+
+**Moving a block** (the PRE/POST switch) is an int set with sub `0x12`,
+addressed by the block's current slot/group, with the new slot/group as
+the value (`<slot u16><group u16>`). Delay post -> pre was `4/5` -> `5/2`.
+The POD answers by re-announcing the block as enabled at its new position,
+and the record order in the tone block doesn't change: only its
+slot/group fields do.
 
 **Tempo sync** is an int set with sub `0x14`, addressed by slot/group like
 block on/off. The value is the FX TEMPO menu position: 0 Off, 1 Whole,
@@ -273,6 +282,7 @@ parses them.
 +0x06  group      u16   02 = pre-amp, 03 = amp section, 05 = post-amp
 +0x08  enabled    u8    0/1 (the live block on/off int set writes this)
 +0x09  sync       u8    tempo-sync division (see sub 0x14 below), 0 = off
+                        (block move = sub 0x12, see below)
 +0x0A  00
 +0x0B  count      u8    number of parameter records that follow
 +0x0C  params     count × 8 bytes: <idx u16> <type u16> <value 4 bytes>
@@ -285,7 +295,9 @@ a block is switched between pre and post. Mod shows up as slot 3/group 5
 or 9/5. The live int/float sets address a block by its current slot and
 group, not by record index.
 
-Parameter records: `<idx u16> <namespace u16> <f32 LE>`. **A parameter is
+Parameter records: `<idx u16> <namespace u16> <f32 LE>`. The first four
+bytes are simply GearBox's 32-bit parameter ID in little-endian
+(`01 00 10 3F` = `0x3F100001`, see `docs/L6T.md`). **A parameter is
 identified by (idx, namespace), not idx alone.** The delay block, for
 example, has Feedback at `1`/`10 3F` and Mix at `1`/`01 3F`. Every value
 seen so far is a float:
@@ -305,6 +317,8 @@ probably left over from a previous model. The unit accepts them.
 
 #### Tone header (0x00-0xE3)
 
+`docs/L6T.md` maps each of these fields to its GearBox `.l6t` parameter ID.
+
 | Offset | Field | Evidence |
 |---|---|---|
 | `0x00` | Tone name, ASCII, space-padded, 16 bytes | all tones |
@@ -323,7 +337,7 @@ probably left over from a previous model. The unit accepts them.
 | `0x57` | u8 **footswitch** (param `0x1D`): 0 Compressor, 1 Amp, 2 FX Loop, 3 Reverb | PUT diff |
 | `0x58` | 4 bytes **tweak parameter**: the `<idx u16><namespace u16>` key (param `0x1F`) | PUT diff |
 | `0x60` | f32, **Tone 1+2 vol trim in dB** (param `0x25`), tone 1 only | PUT diff, -4.5 on 8D |
-| `0x64` | f32 around 0.57 on every tone seen (0.56-0.57) | unknown |
+| `0x64` | f32 around 0.57 on every tone seen (0.56-0.57); `.l6t` ID `3F200017` | unknown |
 | `0xD4`-`0xD5` | copy of the Variax model/tone pair, tone 1 only. **Gearbox zeroes it when writing** | 8D before/after PUT |
 
 Model IDs are in the amp record (`+0x00` at tone offset `0x0E4`) and the

@@ -17,8 +17,16 @@ Known anomalies:
 - **Delay (`02`)** starts with "Amp Tremolo" and "Delay" at IDs 0 and 1,
   which GearBox's delay menu does not offer. The confirmed IDs (2 = Analog
   Delay, 4 = Tube Echo) fix the table's alignment regardless.
-- **FX loop block** (`0B`) has model ID `10` in every dump seen, but this
-  table puts "POD X3 FX Loop" at 9 and "POD X3 VIBE" at 10. Unresolved.
+- **Table `0B` only matches this list for IDs 0 (Noise Gate) and 1
+  (Compressor).** The 558 factory presets and the dumps show `0B` model 2 is
+  the CAB/ER room block (in every preset, param `3F100000` = room), 10 is
+  the FX loop, 12 holds the Variax model/tone, and 13 and 14 are two more
+  small blocks (params `3F20000B`-`0D` and `3F20000E`-`11`). The names
+  below past ID 1 are therefore wrong for `0B`.
+- **Amps come in three tables.** The list below is anchored for amp table
+  `02`. The presets also use amp table `03` (models with three extra
+  `3F2000xx` params) and `04` (12 params), probably model packs; their
+  names are not mapped.
 
 ## amp (category 00)
 

@@ -49,7 +49,7 @@ def parse_tone(t):
             params.append((idx, ptype, b[16 + p * 8: 20 + p * 8]))
         tail = b[12 + count * 8:]
         blocks.append(dict(n=n, model=model, kind=kind, slot=slot, group=group,
-                           enabled=enabled, pad=b[9:11], params=params,
+                           enabled=enabled, sync=b[9], pad=b[10:11], params=params,
                            tail_nonzero=any(tail)))
     return name, blocks
 
@@ -64,7 +64,8 @@ def main():
                 label = block_name(b)
                 ps = " ".join(f"{NS.get(t, f'[{t:04x}]')}{i}={fmt_value(t, v)}"
                               for i, t, v in b["params"])
-                flag = " TAIL!" if b["tail_nonzero"] or any(b["pad"]) else ""
+                flag = (f" sync={b['sync']}" if b["sync"] else "") + \
+                       (" EXTRA-BYTES" if b["tail_nonzero"] or any(b["pad"]) else "")
                 print(f"  [{b['n']:2}] {label:6} slot={b['slot']:2} grp={b['group']} "
                       f"model={b['model']:3} kind={b['kind']:04x} on={b['enabled']}{flag}  {ps}")
 
