@@ -12,6 +12,14 @@ strings begins, so treat entries far past the last ✓ as likely rather than
 confirmed. Some tables include models that need Line 6 model packs, and the
 amp table includes the bass amps.
 
+**Cross-check from knob names (2026-09-24):** `KNOBS.md` lists the Tweak-menu
+knob names for 74 models seen in the unit's 64 patches. For every one of
+them, the knob set fits the name this table gives (Echo Platter and
+Multi-Head have Heads/Flutter, Low Rez has Bits, the springs have Dwell,
+Boost + EQ has Mid Freq, Sub Octaves has -1/-2 Oct, the De-Essers have
+Frequency/Amount...). That confirms the alignment of every effect table
+below, not just the ✓ entries.
+
 Known anomalies:
 
 - **Delay (`02`)** starts with "Amp Tremolo" and "Delay" at IDs 0 and 1,
@@ -202,6 +210,22 @@ Known anomalies:
 | 53 (`35`) | 4x12 Green 25s |  |
 | 54 (`36`) | 4x15 Big Boy |  |
 | 55 (`37`) | 8x10 Classic |  |
+
+## type 00 stomp (dynamics)
+
+| ID | Name | Confirmed |
+|---|---|---|
+| 0 (`00`) | Compressor |  |
+| 1 (`01`) | Noise Gate |  |
+| 2 (`02`) | Blue Comp | ✓ Tweak labels Sustain/Level |
+| 3 (`03`) | Blue Comp Treb |  |
+| 4 (`04`) | Red Comp |  |
+| 5 (`05`) | Vetta Comp | ✓ Tweak labels Sensitivity/Level |
+| 6 (`06`) | Vetta Juice | ✓ Tweak labels Amount/Level |
+| 7 (`07`) | Auto Swell | ✓ Tweak labels Ramp/Depth |
+| 8 (`08`) | Auto Swell |  |
+| 9 (`09`) | Female De-Esser | ✓ Tweak labels Frequency/Amount |
+| 10 (`0A`) | Male De-Esser | ✓ Tweak labels Frequency/Amount |
 
 ## type 02 delay
 

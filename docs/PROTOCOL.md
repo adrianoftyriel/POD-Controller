@@ -387,9 +387,11 @@ treat this as confirmed once the POD accepts it.
 
 ## What's genuinely unknown
 
-1. **Knob maps for other effect models.** The knob map above covers the
-   models loaded on 8D. Other models (and their `u` real-unit ranges)
-   need the same knob sweep, run with each model loaded.
+1. **Knob names for models not used by any patch on the unit.**
+   `docs/KNOBS.md` covers 74 models (every model in the 64 patches), read
+   from Gearbox's Tweak menus. Models no patch uses, the `u` real-unit
+   ranges, and knobs Gearbox doesn't offer as tweak targets are still
+   open.
 2. **The last tone header fields:** `0x26` (non-zero on one tone only),
    the constant at `0x40`, the ~0.57 float at `0x64`, and why tone 1 has a
    Variax copy at `0xD4`. Everything else the Gearbox UI exposes is now
