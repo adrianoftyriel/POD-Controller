@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use pod_core::{AmpKnob, Block, PodDevice};
 
+mod serve;
+
 /// Dev/probe tool for reverse-engineering and testing the POD X3 USB
 /// protocol. Not an end-user application.
 #[derive(Parser)]
@@ -78,6 +80,17 @@ enum Command {
         /// Number of 64-byte packets to read.
         #[arg(long, default_value_t = 8)]
         count: usize,
+    },
+    /// Serve a minimal live-view web page showing real patch names read
+    /// straight off the device, polling every few seconds. Read-only,
+    /// GET-only, single-threaded — a quick way to watch it work, not
+    /// something to expose beyond a trusted LAN.
+    Serve {
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Bank to show (1-32).
+        #[arg(long, default_value_t = 1)]
+        bank: u8,
     },
 }
 
@@ -180,6 +193,9 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Command::Serve { port, bank } => {
+            serve::run(port, bank)?;
         }
     }
     Ok(())

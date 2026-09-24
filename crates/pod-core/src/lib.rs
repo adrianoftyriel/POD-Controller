@@ -1,3 +1,4 @@
+pub mod blob;
 pub mod device;
 pub mod error;
 pub mod params;
