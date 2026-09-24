@@ -48,17 +48,24 @@ After this handshake, normal operation moves to the bulk endpoints.
 
 ## Bulk transfer framing
 
-Every bulk packet (max 64 bytes) starts with a 4-byte header:
+Bulk data is a stream of **chunks**, each a 4-byte header plus up to 252
+(`0xFC`) bytes of payload, so at most 256 bytes. The chunks are carried in
+64-byte USB packets and can span several of them. (Confirmed from
+captures: a 4108-byte patch write is 16 chunks of `0xFC` + one of `0x44`,
+and `ContentsLength` is the chunk's own payload length.)
 
 ```
-byte 0: ContentsLength
+byte 0: ContentsLength (payload bytes in this chunk, <= 0xFC)
 byte 1: 00 from the POD; junk from Gearbox (probably unused, see below)
 byte 2: Flags — 0x01 = first packet of a message, 0x04 = continuation
 byte 3: as byte 1
 ```
 
-Multi-packet messages are reassembled by concatenating payloads across
-packets until `ContentsLength` worth of data has been collected. (Reference
+A message longer than 252 bytes is split across chunks: the first has flag
+`0x01`, the rest `0x04`, and the message is the concatenation of their
+payloads. Its total length comes from the message itself (e.g. 4104 for an
+EffectDump reply), not from any one header. `tools/vm-capture/msgs.py`
+reassembles this way. (Reference
 implementation: `PacketCompleter` in andree182/podx3.)
 
 ## Message types (payload byte 0, after the 4-byte framing header)
