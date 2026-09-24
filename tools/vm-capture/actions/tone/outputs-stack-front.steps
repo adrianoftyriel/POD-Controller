@@ -1,0 +1,4 @@
+# 1/4" outputs -> Stack Front
+click 705 399
+sleep 0.8
+click 700 483

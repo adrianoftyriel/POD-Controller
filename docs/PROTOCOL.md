@@ -187,10 +187,12 @@ chain slot/group. Model-specific knobs will differ for other models.
 | Reverb (Brite Room) | 5/5 | Decay `0k`, Pre-delay `1k`, Tone `2k`, Mix `2m` |
 | Amp | 0/3 | Bass `0k`, Middle `1k`, Treble `2k`, Drive `3k`, Presence `4k`, Volume `5k` |
 
-The Time (delay) and Speed (mod) knobs also send an int message with
-sub `0x14` for the same slot/group, value `0`, once per step. It is
-probably "tempo sync off" (the panels have an FX TEMPO on/off button).
-Unconfirmed.
+**Tempo sync** is an int set with sub `0x14`, addressed by slot/group like
+block on/off. The value is the FX TEMPO menu position: 0 Off, 1 Whole,
+2 Half (dot), 3 Half, 4 Half (3), 5 Quarter (dot), 6 Quarter, 7 Quarter (3),
+8 8th (dot), 9 8th, 10 8th (3), 11 16th (dot), 12 16th, 13 16th (3). It is
+stored at **block record `+0x09`** (verified: 0 -> 6 for Quarter). Turning
+the Time/Speed knob sends sub `0x14` = 0, which switches sync off.
 
 ### Tone-level and global controls
 
@@ -218,10 +220,31 @@ moving the volume function off pedal 2.
 | `0x1E` | Tweak block (int, block record index) | `0x56` |
 | `0x1F` | Tweak parameter (raw `<idx><namespace>` key) | `0x58` |
 | `0x20` | Studio/Direct mix slider, per tone | `0x3C` |
-| `0x24` | "tone selected" flag, sent as a pair (0/1) on a tone switch | ? |
+| `0x00` | Variax model (int) | `0x28` |
+| `0x01` | Variax tone (int 0-127) | `0x29` |
+| `0x17` | Tempo, BPM (TAP) | `0x38` |
+| `0x19` | Room / ER (float) | `0x44` |
+| `0x1A` | Mic (int) | `0x52` |
+| `0x24` | Tone active: sent as a pair on a tone switch, and for tone 1 it is DUAL TONE | `0x55` |
 | `0x25` | Tone 1+2 vol trim, dB (sent with tone 0) | tone 1 `0x60` |
 
-MONITOR is not part of the tone. It uses a different route:
+Device-wide settings use `04`/`20` on channel `00`, with a setting ID at
+message offset `0x10` and a u32 value at `0x14`. They are not stored in
+patches:
+
+| ID | Setting |
+|---|---|
+| `03` | selected tone (0/1). Also sent on channel `02` when loading a patch |
+| `07` | 1/4" outputs: 0 Match Studio/Dir, 1 Studio/Dir Tone 1, 2 Studio/Dir Tone 2, 3 Combo Front, 4 Combo Pwr Amp, 5 Stack Front, 6 Stack Power Amp |
+
+The `02`/`21` queries Gearbox sends after every patch load ask for IDs
+`03` and `07`, and the `04`/`22` replies carry their current values.
+
+The Variax Type menu (Electric/Acoustic/Bass) makes Gearbox re-push the
+tone, but nothing in the stored patch changes. It seems to only pick which
+list the Variax model menu shows.
+
+MONITOR is not part of the tone either. It uses a different route:
 `02 00 04 41 04 00 13 00 <f32>` (0.0-1.0). It also doesn't appear in the
 written patch.
 
@@ -249,7 +272,8 @@ parses them.
 +0x04  slot       u16   chain position, same values as the live int-set address
 +0x06  group      u16   02 = pre-amp, 03 = amp section, 05 = post-amp
 +0x08  enabled    u8    0/1 (the live block on/off int set writes this)
-+0x09  00 00
++0x09  sync       u8    tempo-sync division (see sub 0x14 below), 0 = off
++0x0A  00
 +0x0B  count      u8    number of parameter records that follow
 +0x0C  params     count × 8 bytes: <idx u16> <type u16> <value 4 bytes>
 ```
@@ -284,18 +308,23 @@ probably left over from a previous model. The unit accepts them.
 | Offset | Field | Evidence |
 |---|---|---|
 | `0x00` | Tone name, ASCII, space-padded, 16 bytes | all tones |
-| `0x28`-`0x29` | two values 0-127 (`43 7F`, `47 64`, `0E 7F`...) | meaning unknown |
+| `0x28` | u8 **Variax model** (param `0x00`): 0 "(Don't Control)", then groups of five: Custom 1 (1-5), T-Model (6-10), Spank (11-15), Lester, Special, R-Billy, Chime, Semi, Jazzbox, Acoustic, Reso, Custom 2 (56-60). Values above 60 are "User" models | PUT diff, menu |
+| `0x29` | u8 **Variax tone** 0-127 (param `0x01`) | PUT diff |
 | `0x36` | u8 **pedal control** (param `0x1B`), tone 1 only: 0 Tone 1, 1 Tone 2, 2 Both | PUT diff |
 | `0x3C` | f32, **Studio/Direct mix** (tone-level param `0x20`), about -1..1, 0 = centre | PUT diff |
-| `0x38` | f32, **likely tempo in BPM**: 120.0 on untouched tones, 118.6 on 8D, and the mod/delay panels show "FX TEMPO 118.6" | 8 tones + screen |
-| `0x40` | a `10 3F` float record (idx 0) | meaning unknown |
+| `0x38` | f32 **tempo in BPM** (param `0x17`, set by TAP) | PUT diff: 118.6 -> 94.19 after tapping |
+| `0x40` | `00 00 10 3F`, constant so far (looks like a record header for the next field) | |
+| `0x44` | f32 **room / early reflections** 0-1 (param `0x19`, CAB/ER panel) | PUT diff |
+| `0x52` | u8 **mic** (param `0x1A`): 0 57 On Axis, 1 57 Off Axis, 2 421 Dynamic, 3 67 Condenser | PUT diff |
+| `0x55` | u8 **tone active** (param `0x24`): always 1 on tone 1. On tone 2 it is the DUAL TONE switch | PUT diff |
 | `0x51` | u8 **input** (param `0x16`): 0 Same (tone 2 only), 1 Guitar, 2 Mic, 3 Aux, 4 Variax, 5 Guitar+Aux, 6 Guitar+Variax, 7 Gtr+Aux+Var | PUT diff |
 | `0x54` | u8 **pedal assign** (param `0x1C`): 0 "1=W/V 2=Vol", 1 "1=Twk 2=Vol", 2 "1=W/V 2=Tw" | PUT diff |
 | `0x56` | u8 **tweak block**, as a block record index (param `0x1E`) | PUT diff |
 | `0x57` | u8 **footswitch** (param `0x1D`): 0 Compressor, 1 Amp, 2 FX Loop, 3 Reverb | PUT diff |
 | `0x58` | 4 bytes **tweak parameter**: the `<idx u16><namespace u16>` key (param `0x1F`) | PUT diff |
 | `0x60` | f32, **Tone 1+2 vol trim in dB** (param `0x25`), tone 1 only | PUT diff, -4.5 on 8D |
-| `0xD4`-`0xD5` | copy of `0x28`-`0x29`, tone 1 only. **Gearbox zeroes it when writing** | 8D before/after PUT |
+| `0x64` | f32 around 0.57 on every tone seen (0.56-0.57) | unknown |
+| `0xD4`-`0xD5` | copy of the Variax model/tone pair, tone 1 only. **Gearbox zeroes it when writing** | 8D before/after PUT |
 
 Model IDs are in the amp record (`+0x00` at tone offset `0x0E4`) and the
 cab record (tone offset `0x170`), matching the offsets found earlier.
@@ -336,10 +365,10 @@ obvious pattern (`42`, `53`, `0F`, `F7`, ...), which is still unknown.
 1. **Knob maps for other effect models.** The knob map above covers the
    models loaded on 8D. Other models (and their `u` real-unit ranges)
    need the same knob sweep, run with each model loaded.
-2. **The rest of the tone header** (0x00-0xE3): the 1/4" outputs setting,
-   the `0x28` pair and the `0x40` record are unmapped. Name, mix, vol
-   trim, (likely) tempo, inputs, pedal, tweak and footswitch settings are
-   identified.
+2. **The last tone header fields:** `0x26` (non-zero on one tone only),
+   the constant at `0x40`, the ~0.57 float at `0x64`, and why tone 1 has a
+   Variax copy at `0xD4`. Everything else the Gearbox UI exposes is now
+   mapped.
 3. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
    independent of USB. Line6 publishes an official MIDI CC chart for X3
    Live, but per `pod-ui` maintainer `arteme` (issue #70), full SysEx

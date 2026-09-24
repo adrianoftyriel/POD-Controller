@@ -1,0 +1,6 @@
+# 8D delay panel: TAP x3
+click 355 373
+sleep 0.5
+click 355 373
+sleep 0.5
+click 355 373
