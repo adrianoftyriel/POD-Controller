@@ -81,6 +81,50 @@ Value range for this parameter is `0x00000000`–`0x3F800000` = `0.0`–`1.0`.
 is a concrete, tractable reverse-engineering task: enumerate parameter
 indices by trial against real hardware and record them here as found.
 
+## Confirmed from real Gearbox traffic (2026-09-24)
+
+Captured with `tools/vm-capture/` (Gearbox on a Windows 7 VM, POD X3 Live
+passed through by device, host-side `usbmon`). Each finding comes from a
+single scripted UI action with its own capture in `captures/`.
+
+Setting a parameter from the Gearbox UI is **fire-and-forget**: one bulk
+OUT on endpoint `0x01` per value change, and no bulk IN reply appeared in
+any of the captures. Knob drags stream one float set per mouse step (with
+the occasional back-to-back duplicate), not just the final value.
+
+### Int set (`0x04`): block on/off
+
+```
+14 00 01 00  04 00 0A 40 01 03 00 13 00 00 00 00 00 00 02 00 <u32 LE value>
+```
+
+| Control | Offset 0x12 (u16?) | Values |
+|---|---|---|
+| Noise gate on/off | `02 00` | `00000000` off, `01000000` on |
+
+### Float set (`0x06`): amp knobs
+
+```
+1C 00 01 00  06 00 0A 40 01 03 00 15 00 00 00 00 00 00 03 00 01 00 00 00 <idx> 00 10 3F <f32 LE>
+```
+
+| Knob | `idx` (offset 0x18) |
+|---|---|
+| Bass | `00` |
+| Middle | `01` |
+| Treble | `02` |
+| Drive | `03` |
+| Presence | `04` |
+| Volume | `05` (matches the example above) |
+
+Values are 0.0-1.0. For example, the DRIVE knob at its "5ish" position read
+`0x3F062188` ≈ 0.524, and a 40px drag upward took it to `0x3F3BA4DC` ≈ 0.733.
+
+**Open:** the example above has `01` at offset 0x0C where Gearbox sent `00`.
+That byte might select Tone 1/Tone 2 (all of these captures were on Tone 1),
+but this is unconfirmed. The meaning of `10 3F` after `idx`, and of the
+`0A 40 01 03` block, is also unknown.
+
 ## What's genuinely unknown
 
 1. **EffectDump internal byte layout.** We can read/write the whole 4096-byte
@@ -101,8 +145,9 @@ indices by trial against real hardware and record them here as found.
 
 ## Reverse-engineering methodology going forward
 
-Since we don't have access to a working Gearbox install to capture its USB
-traffic, the practical path is **black-box diffing against real hardware**:
+Gearbox traffic can now be captured (see above and `tools/vm-capture/`),
+which is the fastest way to map live parameters. For the EffectDump layout,
+**black-box diffing against real hardware** still applies:
 
 1. Take an EffectDump of a patch.
 2. Change exactly one thing on the unit's own front panel (e.g. tweak one

@@ -6,19 +6,26 @@
 # with the actual USB traffic instead of just EffectDump diffs.
 #
 # Usage:
-#   ./run-action.sh <vmid> <action-name> ["<description>"]
+#   ./run-action.sh <vmid> <action-name> ["<description>"] [--steps <file>]
 #
-# This does not click anything for you. It brackets a capture window
-# around one manual action; scripted clicking (via vm_click in lib.sh) can
-# replace the manual step once real Gearbox screen coordinates are known
-# from a captured screenshot.
+# Without --steps it waits for you to perform the action by hand on the VM
+# console. With --steps it plays a vmctl.py steps file (see actions/)
+# instead, so a run needs no human at all.
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./lib.sh
 
 VMID=${1:?usage: run-action.sh <vmid> <action-name> [description]}
 NAME=${2:?usage: run-action.sh <vmid> <action-name> [description]}
-DESC=${3:-}
+DESC=""
+STEPS=""
+shift 2
+while (( $# )); do
+    case "$1" in
+        --steps) STEPS=${2:?--steps needs a file}; shift 2 ;;
+        *) DESC=$1; shift ;;
+    esac
+done
 VIDPID="0e41:414b"
 
 mkdir -p captures
@@ -27,28 +34,40 @@ OUTDIR="captures/${SEQ}-${NAME}"
 mkdir -p "$OUTDIR"
 
 echo "before screenshot..."
-vm_screenshot_png "$VMID" "$OUTDIR/before.png"
+./vmctl.py "$VMID" screenshot "$OUTDIR/before.png"
 
 echo "starting usb capture..."
 ./usb-capture.sh start "$VIDPID" "$OUTDIR/traffic.pcapng"
 
-echo
-echo "Perform exactly ONE action in Gearbox now (e.g. load one patch,"
-echo "tweak one knob, rename one patch). Press Enter when done."
-read -r
+if [[ -n "$STEPS" ]]; then
+    cp "$STEPS" "$OUTDIR/action.steps"
+    # Give dumpcap a moment to open the interface, then play the action
+    # and let the device answer before the capture window closes.
+    sleep 1
+    echo "playing $STEPS..."
+    ./vmctl.py "$VMID" steps "$STEPS"
+    sleep "${SETTLE:-2}"
+else
+    echo
+    echo "Perform exactly ONE action in Gearbox now (e.g. load one patch,"
+    echo "tweak one knob, rename one patch). Press Enter when done."
+    read -r
+fi
 
 ./usb-capture.sh stop "$OUTDIR/traffic.pcapng.pid"
 
 echo "after screenshot..."
-vm_screenshot_png "$VMID" "$OUTDIR/after.png"
+./vmctl.py "$VMID" screenshot "$OUTDIR/after.png"
 
 {
     echo "action: $NAME"
     echo "description: $DESC"
     echo "timestamp: $(date -Iseconds)"
     echo "vmid: $VMID"
+    [[ -n "$STEPS" ]] && echo "steps: $STEPS"
     echo "dir: $OUTDIR"
     echo
 } >> captures/actions.log
 
-echo "saved to $OUTDIR"
+./decode.sh "$OUTDIR/traffic.pcapng" > "$OUTDIR/bulk.txt" || true
+echo "saved to $OUTDIR ($(grep -c . "$OUTDIR/bulk.txt" || true) bulk messages)"

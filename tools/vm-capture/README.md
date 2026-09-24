@@ -29,10 +29,38 @@ host's `usbmon`.
 3. Load `usbmon` and install capture tools:
    ```
    modprobe usbmon
-   apt install wireshark-common imagemagick   # dumpcap + convert/identify
+   apt install wireshark-common tshark imagemagick   # dumpcap, decode.sh, lib.sh
    ```
 
 ## Usage
+
+### Scripted (no human needed)
+
+```
+tools/vm-capture/run-suite.sh <vmid> actions/gate-on.steps actions/drive-down.steps ...
+tools/vm-capture/run-action.sh <vmid> <name> "<description>" --steps actions/foo.steps
+```
+
+A steps file is a list of `vmctl.py` commands (`click x y`, `drag x1 y1 x2 y2
+[steps]`, `wheel x y up|down [n]`, `key ret`, `sleep 0.5`, ...) in guest
+screen pixels. Each run writes `before.png`, `after.png`, `traffic.pcapng`,
+the `action.steps` it played, and `bulk.txt` (the decoded bulk payloads, via
+`decode.sh`) to `captures/<NNN-name>/`. `SETTLE=<s>` sets how long to keep
+capturing after the last step (default 2), and `GAP=<s>` sets the pause
+between suite actions.
+
+`vmctl.py` talks QMP directly on `/var/run/qemu-server/<vmid>.qmp`. The
+`qm monitor` path in `lib.sh` costs ~0.8s per command, which turns every
+click into a 1s press-and-hold and rules out knob drags.
+
+Known GearBox coordinates (800x600 guest, GearBox window at its default
+position): amp knobs at y=130 (Drive 228, Bass 315, Middle 401, Treble 487,
+Presence 573, Volume 660; drag vertically). Block ON/OFF strips are at
+y=282 (Gate 229, Wah 277, Stomp 328, Amp 378, Comp 428, EQ 479, Vol 528,
+Mod 627, Delay 677, Verb 727). Clicking the upper half of a block (y≈258)
+opens its panel instead of toggling it.
+
+### Manual
 
 ```
 tools/vm-capture/run-action.sh <vmid> <action-name> ["<description>"]

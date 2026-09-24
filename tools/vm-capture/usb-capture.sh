@@ -34,7 +34,7 @@ start_capture() {
     fi
     local iface="usbmon${bus}"
     [[ -e "/dev/${iface}" ]] || iface="usbmon0"
-    dumpcap -i "$iface" -w "$outfile" &
+    dumpcap -q -i "$iface" -w "$outfile" 2>/dev/null &
     echo $! > "${outfile}.pid"
     echo "capturing on $iface (bus $bus, device $vidpid) -> $outfile (pid $(cat "${outfile}.pid"))"
 }
@@ -44,7 +44,14 @@ stop_capture() {
     local pid
     pid=$(cat "$pidfile")
     kill -INT "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    # dumpcap was started by a different invocation of this script, so it
+    # is not our child and `wait` can't see it - poll until it has exited
+    # and flushed the pcapng.
+    local i
+    for (( i=0; i<50; i++ )); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
     rm -f "$pidfile"
 }
 
