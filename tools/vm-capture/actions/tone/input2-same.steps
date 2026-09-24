@@ -1,0 +1,4 @@
+# 8D: Input 2 -> Same
+click 60 198
+sleep 0.8
+click 45 216

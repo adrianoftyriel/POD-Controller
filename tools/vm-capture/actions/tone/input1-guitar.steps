@@ -1,0 +1,4 @@
+# 8D: Input 1 -> Guitar
+click 60 175
+sleep 0.8
+click 50 193

@@ -1,0 +1,4 @@
+# 8D: fs2 -> alt
+click 60 430
+sleep 0.8
+click 70 461

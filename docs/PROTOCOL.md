@@ -197,11 +197,26 @@ Unconfirmed.
 Tone-level controls use `05`/`16`:
 
 ```
-05 00 0A 40 01 03 00 16 <tone u32> 01 00 00 00 <param u32> <f32 LE>
+05 00 0A 40 01 03 00 16 <tone u32> <kind u32> <param u32> <value>
 ```
+
+`kind` is `1` for a float value and `0` for an integer (menus). "Input 1"
+and "Input 2" in the UI are param `0x16` for tone 0 and tone 1, and the
+same goes for the paired pedal/tweak/footswitch menus.
+
+The POD can also **report** changes back. After a pedal-assign change it
+sent `04 00 0A 03 00 40 00 13 ...` (route reversed, channel `00`): an int
+set turning off the volume block (slot 2/group 5), a side effect of
+moving the volume function off pedal 2.
 
 | param | Control | Stored at (tone header) |
 |---|---|---|
+| `0x16` | Input (int) | `0x51` |
+| `0x1B` | Pedal control (int, tone 0) | tone 1 `0x36` |
+| `0x1C` | Pedal assign (int) | `0x54` |
+| `0x1D` | Footswitch (int) | `0x57` |
+| `0x1E` | Tweak block (int, block record index) | `0x56` |
+| `0x1F` | Tweak parameter (raw `<idx><namespace>` key) | `0x58` |
 | `0x20` | Studio/Direct mix slider, per tone | `0x3C` |
 | `0x24` | "tone selected" flag, sent as a pair (0/1) on a tone switch | ? |
 | `0x25` | Tone 1+2 vol trim, dB (sent with tone 0) | tone 1 `0x60` |
@@ -270,9 +285,15 @@ probably left over from a previous model. The unit accepts them.
 |---|---|---|
 | `0x00` | Tone name, ASCII, space-padded, 16 bytes | all tones |
 | `0x28`-`0x29` | two values 0-127 (`43 7F`, `47 64`, `0E 7F`...) | meaning unknown |
+| `0x36` | u8 **pedal control** (param `0x1B`), tone 1 only: 0 Tone 1, 1 Tone 2, 2 Both | PUT diff |
 | `0x3C` | f32, **Studio/Direct mix** (tone-level param `0x20`), about -1..1, 0 = centre | PUT diff |
 | `0x38` | f32, **likely tempo in BPM**: 120.0 on untouched tones, 118.6 on 8D, and the mod/delay panels show "FX TEMPO 118.6" | 8 tones + screen |
 | `0x40` | a `10 3F` float record (idx 0) | meaning unknown |
+| `0x51` | u8 **input** (param `0x16`): 0 Same (tone 2 only), 1 Guitar, 2 Mic, 3 Aux, 4 Variax, 5 Guitar+Aux, 6 Guitar+Variax, 7 Gtr+Aux+Var | PUT diff |
+| `0x54` | u8 **pedal assign** (param `0x1C`): 0 "1=W/V 2=Vol", 1 "1=Twk 2=Vol", 2 "1=W/V 2=Tw" | PUT diff |
+| `0x56` | u8 **tweak block**, as a block record index (param `0x1E`) | PUT diff |
+| `0x57` | u8 **footswitch** (param `0x1D`): 0 Compressor, 1 Amp, 2 FX Loop, 3 Reverb | PUT diff |
+| `0x58` | 4 bytes **tweak parameter**: the `<idx u16><namespace u16>` key (param `0x1F`) | PUT diff |
 | `0x60` | f32, **Tone 1+2 vol trim in dB** (param `0x25`), tone 1 only | PUT diff, -4.5 on 8D |
 | `0xD4`-`0xD5` | copy of `0x28`-`0x29`, tone 1 only. **Gearbox zeroes it when writing** | 8D before/after PUT |
 
@@ -316,8 +337,9 @@ obvious pattern (`42`, `53`, `0F`, `F7`, ...), which is still unknown.
    models loaded on 8D. Other models (and their `u` real-unit ranges)
    need the same knob sweep, run with each model loaded.
 2. **The rest of the tone header** (0x00-0xE3): inputs, pedal/tweak/
-   footswitch assignments, outputs, the `0x28` pair and the `0x40` record
-   are unmapped. Name, mix, vol trim and (likely) tempo are identified.
+   footswitch the 1/4" outputs setting, the `0x28` pair, and the `0x40` record
+   are unmapped. Name, mix, vol trim, (likely) tempo, inputs, pedal,
+   tweak and footswitch settings are identified.
 3. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
    independent of USB. Line6 publishes an official MIDI CC chart for X3
    Live, but per `pod-ui` maintainer `arteme` (issue #70), full SysEx

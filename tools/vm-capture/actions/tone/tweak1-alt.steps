@@ -1,0 +1,4 @@
+# 8D: tweak1 -> alt
+click 60 344
+sleep 0.8
+click 70 362

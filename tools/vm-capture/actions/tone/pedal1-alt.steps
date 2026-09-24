@@ -1,0 +1,4 @@
+# 8D: pedal1 -> alt
+click 60 272
+sleep 0.8
+click 70 303
