@@ -21,9 +21,20 @@ GPLv2) and tracks the parallel community effort in
 ## Status
 
 Reading patches from a real POD X3 Live is confirmed working
-(`pod-cli dump`). Writing (`restore`) and live parameter edits
-(`set-amp`, `block`) are implemented against the documented protocol but
-not yet confirmed on hardware.
+(`pod-cli dump`). Live parameter edits (`select`, `set-amp`, `block`) have
+each been confirmed to send correctly-framed messages the device accepts
+(byte-verified against a real device via `usbmon`), but repeated use
+intermittently wedges the device's bulk endpoint — a write stops getting
+acknowledged and every following request times out, with no error logged by
+the host kernel at the moment it happens, needing a physical power cycle to
+recover. It doesn't reproduce on every attempt and isn't tied to a specific
+message or knob, which points at a marginal physical USB link (the same
+capture session logged a `device descriptor read` error and `invalid
+maxpacket` warnings on a plain reconnect, before any of this crate's code
+ran) rather than a bug in the framing/protocol code here. Try a different
+cable/port before assuming otherwise. `restore` (bulk patch write) is
+implemented against the documented protocol but not yet confirmed on
+hardware at all.
 
 ## Planned phasing
 

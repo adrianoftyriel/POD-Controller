@@ -65,7 +65,7 @@ enum Command {
         tone: u8,
         #[arg(long)]
         block: Block,
-        #[arg(long)]
+        #[arg(long, action = clap::ArgAction::Set)]
         enabled: bool,
     },
     /// Send an arbitrary hex-encoded message and print each raw 64-byte
@@ -81,10 +81,11 @@ enum Command {
         #[arg(long, default_value_t = 8)]
         count: usize,
     },
-    /// Serve a minimal live-view web page showing real patch names read
-    /// straight off the device, polling every few seconds. Read-only,
-    /// GET-only, single-threaded — a quick way to watch it work, not
-    /// something to expose beyond a trusted LAN.
+    /// Serve a minimal live-view/live-edit web page for the device: patch
+    /// names polled every few seconds, plus amp knob, block toggle, and
+    /// patch-select controls that write straight to the currently loaded
+    /// patch in real time. Single-threaded — a quick way to watch and
+    /// poke at it, not something to expose beyond a trusted LAN.
     Serve {
         #[arg(long, default_value_t = 8080)]
         port: u16,
