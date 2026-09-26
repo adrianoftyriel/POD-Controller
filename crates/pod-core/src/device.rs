@@ -302,6 +302,57 @@ impl PodDevice {
         ))
     }
 
+    /// Set parameter `id` (Gearbox's 32-bit ID: `<namespace u16><idx u16>`)
+    /// of the block currently at `slot`/`group` on `tone`.
+    pub fn set_param_at(
+        &mut self,
+        tone: u8,
+        slot: u16,
+        group: u16,
+        id: u32,
+        value: f32,
+    ) -> Result<()> {
+        let msg =
+            protocol::encode_float_set(tone, slot, group, id as u16, (id >> 16) as u16, value);
+        self.write_raw(&msg)
+    }
+
+    /// Turn the block currently at `slot`/`group` on or off.
+    pub fn set_enabled_at(&mut self, tone: u8, slot: u16, group: u16, enabled: bool) -> Result<()> {
+        let msg = protocol::encode_int_set(
+            tone,
+            protocol::int_set::BLOCK_ENABLED,
+            slot,
+            group,
+            enabled as u32,
+        );
+        self.write_raw(&msg)
+    }
+
+    /// Move the block at `slot`/`group` to `new_slot`/`new_group` (pre/post
+    /// amp). The POD answers by re-announcing the block as enabled.
+    pub fn move_block(
+        &mut self,
+        tone: u8,
+        slot: u16,
+        group: u16,
+        new_slot: u16,
+        new_group: u16,
+    ) -> Result<()> {
+        let msg = protocol::encode_block_move(tone, slot, group, new_slot, new_group);
+        self.write_raw(&msg)
+    }
+
+    /// Set a tone-level setting (`05`/`16`).
+    pub fn set_tone_setting(
+        &mut self,
+        tone: u8,
+        param: u32,
+        value: protocol::ToneValue,
+    ) -> Result<()> {
+        self.write_raw(&protocol::encode_tone_setting(tone, param, value))
+    }
+
     /// Set an amp knob on `tone` (0 or 1) of the currently loaded patch.
     pub fn set_amp_knob(&mut self, tone: u8, knob: AmpKnob, value: f32) -> Result<()> {
         let msg = protocol::encode_float_set(

@@ -38,6 +38,19 @@ On Linux, the kernel's `snd_usb_podhd` driver binds to the POD and has to
 be kept off it (`blacklist snd_usb_podhd` in `/etc/modprobe.d/`, or unbind
 it) before pod-core can claim the control interface.
 
+### Browser editor
+
+`pod-cli serve --port 8080` runs a web editor for the connected POD:
+- browse all 64 patches (bank strip or an all-banks pop-up);
+- load, rename, and save to any slot;
+- per-block model menus and vertical faders for every parameter;
+- block on/off and pre/post moves;
+- cab, mic and room settings, and Variax model and tone.
+
+Edits are live and stay in a working copy until you save. The UI is
+static files in `crates/pod-cli/ui/`, and the brief for restyling it is
+in [`designprompt.md`](designprompt.md).
+
 ## Planned phasing
 
 1. **Core protocol crate** (`crates/pod-core`, Rust, using [`nusb`](https://docs.rs/nusb)):

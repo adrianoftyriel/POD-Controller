@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en" data-theme="studio-dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POD Controller</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!--
+  Structure only: every element the script needs has an id or data-role.
+  Layout and look live in style.css. See designprompt.md in the repo root
+  before restyling.
+-->
+<header class="topbar">
+  <div class="brand">POD Controller</div>
+
+  <div class="patch-title" data-role="patch-title">
+    <span class="patch-code" id="patch-code">—</span>
+    <button class="patch-name" id="patch-name" title="Rename (Tone 1 name)">No patch loaded</button>
+    <input class="patch-name-edit" id="patch-name-edit" maxlength="16" spellcheck="false" hidden>
+    <span class="dirty-dot" id="dirty-dot" title="Unsaved changes" hidden></span>
+  </div>
+
+  <div class="patch-actions">
+    <button id="btn-save" class="btn primary" disabled>Save</button>
+    <button id="btn-save-as" class="btn" disabled>Save to…</button>
+    <button id="btn-revert" class="btn" disabled>Revert</button>
+  </div>
+
+  <div class="status" id="status" data-state="unknown">
+    <span class="status-dot"></span><span id="status-text">connecting…</span>
+  </div>
+
+  <select id="theme-select" class="theme-select" title="Theme"></select>
+</header>
+
+<section class="bank-strip" id="bank-strip" aria-label="Patches">
+  <button class="bank-nav" id="bank-prev" aria-label="Previous bank">◀</button>
+  <div class="bank-label">
+    <span class="bank-caption">Bank</span>
+    <span class="bank-number" id="bank-number">01</span>
+  </div>
+  <div class="bank-patches" id="bank-patches"></div>
+  <button class="bank-nav" id="bank-next" aria-label="Next bank">▶</button>
+  <button class="btn all-banks" id="btn-all-banks">All banks</button>
+  <div class="scan-progress" id="scan-progress" hidden></div>
+</section>
+
+<section class="tone-bar">
+  <div class="tone-tabs" id="tone-tabs">
+    <button data-tone="0" class="tone-tab active">Tone 1</button>
+    <button data-tone="1" class="tone-tab">Tone 2</button>
+  </div>
+  <div class="tone-name-wrap">
+    <span class="tone-name-caption">Tone name</span>
+    <button class="tone-name" id="tone-name">—</button>
+    <input class="tone-name-edit" id="tone-name-edit" maxlength="16" spellcheck="false" hidden>
+  </div>
+</section>
+
+<section class="chain" id="chain" aria-label="Signal chain"></section>
+
+<main class="editor">
+  <section class="panel" id="panel" data-block="">
+    <div class="empty-hint">Load a patch from the bank strip above to start editing.</div>
+  </section>
+</main>
+
+<footer class="log" id="log"></footer>
+
+<!-- All-banks browser, used both for loading and for choosing where to save. -->
+<div class="modal" id="banks-modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="banks-title">
+    <div class="modal-head">
+      <h2 id="banks-title">All banks</h2>
+      <span class="modal-sub" id="banks-sub"></span>
+      <button class="btn close" id="banks-close" aria-label="Close">✕</button>
+    </div>
+    <div class="banks-grid" id="banks-grid"></div>
+  </div>
+</div>
+
+<template id="fader-template">
+  <div class="fader" data-role="fader" tabindex="0">
+    <div class="fader-value" data-role="value"></div>
+    <div class="fader-track" data-role="track">
+      <div class="fader-fill" data-role="fill"></div>
+      <div class="fader-thumb" data-role="thumb"></div>
+    </div>
+    <div class="fader-label" data-role="label"></div>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>

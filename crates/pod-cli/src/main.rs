@@ -96,9 +96,15 @@ enum Command {
     Serve {
         #[arg(long, default_value_t = 8080)]
         port: u16,
-        /// Bank to show (1-32).
+        /// Bank shown first (1-16).
         #[arg(long, default_value_t = 1)]
         bank: u8,
+        /// Directory the web UI is served from (index.html, style.css,
+        /// app.js, catalog.json, images...). Defaults to crates/pod-cli/ui
+        /// in the source tree if it exists, else a copy built into the
+        /// binary. Edits there show up on a browser reload.
+        #[arg(long)]
+        ui_dir: Option<PathBuf>,
     },
 }
 
@@ -210,8 +216,8 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Serve { port, bank } => {
-            serve::run(port, bank)?;
+        Command::Serve { port, bank, ui_dir } => {
+            serve::run(port, bank, ui_dir)?;
         }
     }
     Ok(())

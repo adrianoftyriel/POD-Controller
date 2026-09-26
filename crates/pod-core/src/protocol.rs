@@ -345,6 +345,39 @@ pub fn encode_block_move(
     encode_int_set(tone, int_set::BLOCK_MOVE, slot, group, value)
 }
 
+/// Subcommand of the tone-level set (message type `0x05`).
+pub const TONE_SETTING_SUB: u8 = 0x16;
+
+/// Build a tone-level set (`05`/`16`): `<tone u32> <kind u32> <param u32>
+/// <value>`, kind 1 for an f32 value and 0 for an integer. Used for the
+/// tone header settings (input, mic, room, Variax, ...), see
+/// docs/PROTOCOL.md "Tone-level and global controls".
+pub fn encode_tone_setting(tone: u8, param: u32, value: ToneValue) -> Vec<u8> {
+    let mut message = common_header(
+        MessageType::IntParam16 as u8,
+        0x00,
+        CHANNEL_LIVE,
+        TONE_SETTING_SUB,
+    )
+    .to_vec();
+    message.extend_from_slice(&(tone as u32).to_le_bytes());
+    let (kind, raw) = match value {
+        ToneValue::Float(v) => (1u32, v.to_le_bytes()),
+        ToneValue::Int(v) => (0u32, v.to_le_bytes()),
+    };
+    message.extend_from_slice(&kind.to_le_bytes());
+    message.extend_from_slice(&param.to_le_bytes());
+    message.extend_from_slice(&raw);
+    encode_chunks(&message)
+}
+
+/// Value of a tone-level set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToneValue {
+    Float(f32),
+    Int(u32),
+}
+
 /// Build a ConfigCmd message requesting the EffectDump for `slot` — see
 /// docs/PROTOCOL.md "02/00: request EffectDump". The reply is decoded with
 /// [`decode_effect_dump`].
@@ -583,6 +616,19 @@ mod tests {
             0x02, 0x00, 0x0A, 0x40, 0x02, 0x03, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
         ];
         assert_eq!(framed, encode_chunks(&expected_message));
+    }
+
+    #[test]
+    fn encode_tone_setting_matches_prior_art_input_set() {
+        // andree182/podx3 setguitarmic(): tone 0, int, param 0x16 = 2.
+        let msg = encode_tone_setting(0, 0x16, ToneValue::Int(2));
+        assert_eq!(
+            msg,
+            [
+                0x18, 0x00, 0x01, 0x00, 0x05, 0x00, 0x0A, 0x40, 0x01, 0x03, 0x00, 0x16, 0, 0, 0, 0,
+                0, 0, 0, 0, 0x16, 0, 0, 0, 2, 0, 0, 0
+            ]
+        );
     }
 
     #[test]

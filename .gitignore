@@ -1,3 +1,6 @@
 /target
 /tools/vm-capture/captures/
 __pycache__/
+tools/ui-check/node_modules/
+tools/ui-check/package*.json
+tools/ui-check/*.png
