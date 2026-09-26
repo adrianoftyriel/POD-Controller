@@ -9,6 +9,9 @@ pub enum PodError {
     #[error("USB transfer error: {0}")]
     Transfer(String),
 
+    #[error("device did not respond in time (possible lockup)")]
+    Timeout,
+
     #[error("malformed response from device: {0}")]
     Protocol(String),
 }

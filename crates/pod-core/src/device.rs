@@ -52,47 +52,57 @@ impl PodDevice {
         })
     }
 
-    /// Send one bulk-framed message and wait for the device's reply,
-    /// reassembling it if it spans multiple packets. This does not yet
-    /// implement the control-transfer init handshake (`CTRL_REQUEST`) —
-    /// callers should perform that once at startup if the device requires
-    /// it (unconfirmed whether it's strictly necessary before bulk I/O).
-    pub fn transact(&mut self, request: &[u8]) -> Result<Vec<u8>> {
-        self.write_raw(request)?;
+    /// Send one already bulk-framed message (see `protocol::encode_*`) and
+    /// wait for the device's reply, reassembling it if it spans multiple
+    /// chunks/packets. This does not yet implement the control-transfer
+    /// init handshake (`CTRL_REQUEST`) — callers should perform that once
+    /// at startup if the device requires it (unconfirmed whether it's
+    /// strictly necessary before bulk I/O).
+    ///
+    /// A single `PodError::Timeout` here means the device didn't answer
+    /// within `TIMEOUT` — a possible lockup. Callers should surface this
+    /// distinctly rather than retrying in a loop; recovery is a power
+    /// cycle, not a resend.
+    pub fn transact(&mut self, framed_request: &[u8]) -> Result<Vec<u8>> {
+        self.write_raw(framed_request)?;
 
         let mut reassembler = PacketReassembler::new();
         loop {
             let packet = self.read_raw()?;
-            if let Some(payload) = reassembler.push(&packet)? {
+            if let Some(payload) = reassembler.push(&packet)?.into_iter().next() {
                 return Ok(payload);
             }
         }
+    }
+
+    /// Send an already bulk-framed message with no expected reply (the set
+    /// messages are fire-and-forget — see docs/PROTOCOL.md).
+    pub fn send(&mut self, framed_message: &[u8]) -> Result<()> {
+        self.write_raw(framed_message)
     }
 
     fn write_raw(&mut self, data: &[u8]) -> Result<()> {
         let mut buf = Buffer::new(data.len());
         buf.extend_from_slice(data);
         let completion = self.out_ep.transfer_blocking(buf, TIMEOUT);
-        completion
-            .status
-            .map_err(|e| PodError::Transfer(format!("bulk OUT failed: {e:?}")))?;
-        Ok(())
+        map_transfer_status(completion.status, "OUT")
     }
 
     fn read_raw(&mut self) -> Result<Vec<u8>> {
         let buf = Buffer::new(protocol::BULK_PACKET_LEN);
         let completion = self.in_ep.transfer_blocking(buf, TIMEOUT);
-        completion
-            .status
-            .map_err(|e| PodError::Transfer(format!("bulk IN failed: {e:?}")))?;
+        map_transfer_status(completion.status, "IN")?;
         Ok(completion.buffer.into_vec())
     }
+}
 
-    /// Set a float parameter on the currently loaded patch. Only
-    /// `param_index = 5` (tone volume) is confirmed correct — see
-    /// `docs/PROTOCOL.md`.
-    pub fn set_float_param(&mut self, param_index: u8, value: f32) -> Result<()> {
-        let msg = protocol::encode_float_param(param_index, value);
-        self.write_raw(&msg)
-    }
+/// Distinguish a timed-out transfer (device unresponsive, possibly wedged)
+/// from other transfer failures. `nusb::Endpoint::transfer_blocking` reports
+/// a timeout as `TransferError::Cancelled` (it cancels the pending transfer
+/// once the deadline passes) — see the crate's `transfer_blocking` docs.
+fn map_transfer_status(status: std::result::Result<(), nusb::transfer::TransferError>, direction: &str) -> Result<()> {
+    status.map_err(|e| match e {
+        nusb::transfer::TransferError::Cancelled => PodError::Timeout,
+        other => PodError::Transfer(format!("bulk {direction} failed: {other:?}")),
+    })
 }

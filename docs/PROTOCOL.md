@@ -451,7 +451,17 @@ treat this as confirmed once the POD accepts it.
    the constant at `0x40`, the ~0.57 float at `0x64`, and why tone 1 has a
    Variax copy at `0xD4`. Everything else the Gearbox UI exposes is now
    mapped.
-3. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
+3. **How a live reader (not an offline capture parser) knows a message is
+   complete**, when a message's length is an exact multiple of 252 bytes.
+   `tools/vm-capture/msgs.py` decides message boundaries by looking at the
+   *next* chunk's `FLAG_FIRST` bit — sound for parsing a whole capture
+   after the fact, but a single `transact()` reply has no "next message" to
+   look ahead into. `pod-core`'s reassembler instead treats any chunk
+   shorter than 0xFC as the last one, which matches every capture on file
+   (e.g. the 4108-byte patch write's trailing 0x4C chunk) but is unverified
+   for a message that's an exact multiple of 252 bytes with no remainder —
+   worth confirming against real hardware once a candidate case is found.
+4. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
    independent of USB. Line6 publishes an official MIDI CC chart for X3
    Live, but per `pod-ui` maintainer `arteme` (issue #70), full SysEx
    patch-dump/UDI support over MIDI on X3 is unconfirmed — he tested a unit

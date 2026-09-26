@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use pod_core::protocol::{self, ParamNamespace};
 use pod_core::PodDevice;
 
 /// Dev/probe tool for reverse-engineering and testing the POD X3 USB
@@ -13,14 +14,59 @@ struct Cli {
 enum Command {
     /// List connected POD X3 / X3 Live devices.
     List,
-    /// Set a float parameter (WARNING: only index 5 = tone volume is
-    /// confirmed correct; anything else is a guess).
+    /// Set a float parameter (knob) on the block currently at slot/group.
+    /// See docs/PROTOCOL.md "Effect knob map" for the slot/group/idx of
+    /// each block's knobs.
     SetFloat {
+        #[arg(long, default_value_t = 0)]
+        tone: u8,
         #[arg(long)]
-        index: u8,
+        slot: u16,
+        #[arg(long)]
+        group: u16,
+        #[arg(long)]
+        idx: u16,
+        #[arg(long, value_enum, default_value_t = Namespace::Normal)]
+        namespace: Namespace,
         #[arg(long)]
         value: f32,
     },
+    /// Turn a block on or off.
+    SetEnabled {
+        #[arg(long, default_value_t = 0)]
+        tone: u8,
+        #[arg(long)]
+        slot: u16,
+        #[arg(long)]
+        group: u16,
+        #[arg(long)]
+        enabled: bool,
+    },
+    /// Select a patch slot as the active patch.
+    SelectPatch {
+        slot: u32,
+    },
+    /// Request the EffectDump for a patch slot and print its length.
+    Dump {
+        slot: u32,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Namespace {
+    Normal,
+    Mix,
+    RealUnit,
+}
+
+impl From<Namespace> for ParamNamespace {
+    fn from(n: Namespace) -> Self {
+        match n {
+            Namespace::Normal => ParamNamespace::Normal,
+            Namespace::Mix => ParamNamespace::Mix,
+            Namespace::RealUnit => ParamNamespace::RealUnit,
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -46,10 +92,41 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Command::SetFloat { index, value } => {
+        Command::SetFloat {
+            tone,
+            slot,
+            group,
+            idx,
+            namespace,
+            value,
+        } => {
             let mut dev = PodDevice::open_first()?;
-            dev.set_float_param(index, value)?;
-            println!("Sent float param index={index} value={value}");
+            let msg = protocol::encode_float_set(tone, slot, group, idx, namespace.into(), value);
+            dev.send(&msg)?;
+            println!("Sent float set tone={tone} slot={slot} group={group} idx={idx} value={value}");
+        }
+        Command::SetEnabled {
+            tone,
+            slot,
+            group,
+            enabled,
+        } => {
+            let mut dev = PodDevice::open_first()?;
+            let msg = protocol::encode_block_enabled(tone, slot, group, enabled);
+            dev.send(&msg)?;
+            println!("Sent block enabled=({enabled}) tone={tone} slot={slot} group={group}");
+        }
+        Command::SelectPatch { slot } => {
+            let mut dev = PodDevice::open_first()?;
+            let msg = protocol::encode_select_patch(slot);
+            dev.send(&msg)?;
+            println!("Selected patch slot {slot}");
+        }
+        Command::Dump { slot } => {
+            let mut dev = PodDevice::open_first()?;
+            let msg = protocol::encode_request_dump(slot);
+            let reply = dev.transact(&msg)?;
+            println!("Got EffectDump reply: {} bytes", reply.len());
         }
     }
     Ok(())
