@@ -201,6 +201,11 @@ a catalog field), add it and say so.
   front panel don't show up in the UI. Show state as "what this editor last
   sent", not as a live meter.
 - There's no audio level data. Don't design meters.
+- The patch can also change under the UI: an AI agent can edit it through
+  the built-in MCP server (`/mcp`). The UI polls `/api/state` and
+  re-renders when `rev` changes (not mid-drag or mid-rename). Keep that
+  behaviour, and consider making outside changes visible (e.g. a brief
+  highlight on the fader that moved).
 - Tone names are at most 16 ASCII characters; slot codes are `01A`-`16D`.
 - Parameter names come from Gearbox's menus, and some are generic ("Param 4",
   "Level 1").

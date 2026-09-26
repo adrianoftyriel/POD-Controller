@@ -51,6 +51,25 @@ Edits are live and stay in a working copy until you save. The UI is
 static files in `crates/pod-cli/ui/`, and the brief for restyling it is
 in [`designprompt.md`](designprompt.md).
 
+### MCP server
+
+The same server speaks the [Model Context Protocol](https://modelcontextprotocol.io)
+at `http://<host>:8080/mcp` (Streamable HTTP), so an AI agent can drive the
+POD by name. It can list and load patches, read the whole chain, change
+models and parameters, and switch blocks on/off or pre/post. It can also set
+Variax, mic and room, rename, and save. It shares the working copy with the
+web UI, and the UI follows the agent's edits. For example, with Claude Code:
+
+```
+claude mcp add --transport http pod http://172.16.88.33:8080/mcp
+```
+
+Knob values are 0-100 (real units where a parameter has one), tones are 1
+and 2, and patches are codes like `08C`. `save_patch` refuses to replace a
+different named patch unless it's given `overwrite: true`. There's no
+authentication, so keep it on a trusted LAN. Requests from foreign web
+origins are rejected.
+
 ## Planned phasing
 
 1. **Core protocol crate** (`crates/pod-core`, Rust, using [`nusb`](https://docs.rs/nusb)):

@@ -610,6 +610,18 @@ async function pollState() {
     sp.textContent = `Reading patch names… ${st.scan.scanned}/${st.scan.total}`;
     sp.style.setProperty('--scan', st.scan.scanned / st.scan.total);
     if (st.scan.scanning || S.patches.some((p) => p.name === null)) await refreshPatches();
+    // Someone else (e.g. an MCP client) changed the working copy: re-render,
+    // unless the user is mid-drag or mid-rename.
+    const busy = document.querySelector('.fader.dragging, input:not([hidden]):focus');
+    if (S.rev !== undefined && st.rev !== S.rev && !busy) {
+      S.rev = st.rev;
+      setCurrent(st.current);
+      if (st.current) S.bank = S.bank || bankOf(st.current.slot);
+      renderPanel();
+      await refreshPatches();
+    } else if (S.rev === undefined) {
+      S.rev = st.rev;
+    }
     return st;
   } catch (e) {
     $('status').dataset.state = 'error';

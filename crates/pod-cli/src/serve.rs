@@ -28,6 +28,8 @@
 //! | `POST /api/move` | `tone`, `block`, `slot`, `group` |
 //! | `POST /api/setting` | `tone`, `key` (see `blob::TONE_SETTINGS`), `value` |
 //!
+//! `/mcp` is an MCP server over the same working copy (see `mcp.rs`).
+//!
 //! `block` is the record index in the tone block (0 amp ... 11 FX loop,
 //! `blob::RECORD_NAMES`).
 
@@ -44,7 +46,7 @@ use serde_json::{json, Value};
 
 /// User patch slots on a POD X3 Live: 16 banks of 4 (Gearbox's GET ALL
 /// reads slots 0-63).
-const SLOT_COUNT: usize = 64;
+pub(crate) const SLOT_COUNT: usize = 64;
 
 /// Record indices of the amp and cab: Gearbox's amp on/off button switches
 /// both.
@@ -61,26 +63,29 @@ const EMBEDDED: &[(&str, &[u8])] = &[
     ("catalog.json", include_bytes!("../ui/catalog.json")),
 ];
 
-struct Working {
-    slot: usize,
-    patch: Vec<u8>,
-    dirty: bool,
+pub(crate) struct Working {
+    pub(crate) slot: usize,
+    pub(crate) patch: Vec<u8>,
+    pub(crate) dirty: bool,
 }
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     dev: Option<PodDevice>,
-    names: Vec<Option<String>>,
-    scanned: usize,
-    scanning: bool,
-    current: Option<Working>,
-    error: Option<String>,
+    pub(crate) names: Vec<Option<String>>,
+    pub(crate) scanned: usize,
+    pub(crate) scanning: bool,
+    pub(crate) current: Option<Working>,
+    pub(crate) error: Option<String>,
     initial_bank: usize,
+    /// Bumped on every successful edit/load/save, so a browser can tell the
+    /// working copy changed under it (e.g. by an MCP client).
+    pub(crate) rev: u64,
 }
 
-type Shared = Arc<Mutex<State>>;
+pub(crate) type Shared = Arc<Mutex<State>>;
 
-fn lock(state: &Shared) -> MutexGuard<'_, State> {
+pub(crate) fn lock(state: &Shared) -> MutexGuard<'_, State> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -108,7 +113,7 @@ fn with_device<T>(
     result
 }
 
-fn slot_code(slot: usize) -> String {
+pub(crate) fn slot_code(slot: usize) -> String {
     format!("{:02}{}", slot / 4 + 1, (b'A' + (slot % 4) as u8) as char)
 }
 
@@ -163,7 +168,7 @@ fn working_json(w: &Working) -> Value {
     })
 }
 
-fn current_json(st: &State) -> Value {
+pub(crate) fn current_json(st: &State) -> Value {
     st.current.as_ref().map(working_json).unwrap_or(Value::Null)
 }
 
@@ -183,6 +188,7 @@ fn state_json(st: &State) -> Value {
         "device": device,
         "error": st.error,
         "initial_bank": st.initial_bank,
+        "rev": st.rev,
         "scan": {"scanned": st.scanned, "total": SLOT_COUNT, "scanning": st.scanning},
         "current": current_json(st),
     })
@@ -202,7 +208,7 @@ fn patches_json(st: &State) -> Value {
 
 // --- API --------------------------------------------------------------------
 
-struct Query(Vec<(String, String)>);
+pub(crate) struct Query(pub(crate) Vec<(String, String)>);
 
 impl Query {
     fn parse(q: &str) -> Self {
@@ -317,7 +323,16 @@ fn parse_params(s: &str) -> Result<Vec<blob::Param>, String> {
         .collect()
 }
 
-fn api(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
+/// Run one API call and bump `rev` if it succeeded.
+pub(crate) fn api(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
+    let result = api_inner(st, path, q);
+    if result.is_ok() {
+        st.rev += 1;
+    }
+    result
+}
+
+fn api_inner(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
     match path {
         "/api/load" => load(st, slot_arg(q)?),
         "/api/revert" => {
@@ -445,7 +460,7 @@ fn api(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
 
 /// Read every slot's name in the background, one slot per lock so UI
 /// requests get in between.
-fn start_scan(state: &Shared) {
+pub(crate) fn start_scan(state: &Shared) {
     {
         let mut st = lock(state);
         if st.scanning {
@@ -493,7 +508,7 @@ fn content_type(path: &str) -> &'static str {
 
 /// A UI file: from `ui_dir` if given, else the built-in copy. `rel` has no
 /// leading slash.
-fn static_file(ui_dir: Option<&Path>, rel: &str) -> Option<Vec<u8>> {
+pub(crate) fn static_file(ui_dir: Option<&Path>, rel: &str) -> Option<Vec<u8>> {
     if rel.split('/').any(|c| c == ".." || c.is_empty()) {
         return None;
     }
@@ -509,10 +524,24 @@ fn static_file(ui_dir: Option<&Path>, rel: &str) -> Option<Vec<u8>> {
 }
 
 fn respond(stream: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) {
-    let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+    respond_with(stream, status, ctype, &[], body)
+}
+
+fn respond_with(
+    stream: &mut TcpStream,
+    status: &str,
+    ctype: &str,
+    headers: &[(&str, String)],
+    body: &[u8],
+) {
+    let mut head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n",
         body.len()
     );
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body);
 }
@@ -526,16 +555,98 @@ fn json_reply(stream: &mut TcpStream, v: Value) {
     )
 }
 
-fn handle(mut stream: TcpStream, state: &Shared, ui_dir: Option<&Path>) {
-    let mut buf = [0u8; 8192];
-    let n = stream.read(&mut buf).unwrap_or(0);
-    let request = String::from_utf8_lossy(&buf[..n]).to_string();
-    let mut parts = request.lines().next().unwrap_or("").split_whitespace();
-    let method = parts.next().unwrap_or("GET");
-    let target = parts.next().unwrap_or("/");
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+/// A parsed HTTP request. Header names are lower-cased.
+pub(crate) struct Request {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) query: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
+}
 
-    match (method, path) {
+impl Request {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Largest request body accepted (MCP calls are small).
+const MAX_BODY: usize = 1 << 20;
+
+fn read_request(stream: &mut TcpStream) -> Option<Request> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .ok()?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        if buf.len() > 64 * 1024 {
+            return None;
+        }
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let mut lines = head.split("\r\n");
+    let mut parts = lines.next()?.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
+    let len: usize = headers
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0);
+    if len > MAX_BODY {
+        return None;
+    }
+    let mut body = buf[head_end + 4..].to_vec();
+    while body.len() < len {
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(len);
+    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+    Some(Request {
+        method,
+        path: path.to_string(),
+        query: query.to_string(),
+        headers,
+        body,
+    })
+}
+
+fn handle(mut stream: TcpStream, state: &Shared, ui: &Ui) {
+    let Some(req) = read_request(&mut stream) else {
+        return respond(&mut stream, "400 Bad Request", "text/plain", b"bad request");
+    };
+
+    match (req.method.as_str(), req.path.as_str()) {
+        (_, "/mcp") => {
+            let reply = crate::mcp::handle(&req, state, &ui.catalog);
+            respond_with(
+                &mut stream,
+                reply.status,
+                reply.content_type,
+                &reply.headers,
+                &reply.body,
+            )
+        }
         ("GET", "/api/state") => json_reply(&mut stream, state_json(&lock(state))),
         ("GET", "/api/patches") => json_reply(&mut stream, patches_json(&lock(state))),
         ("POST", "/api/rescan") => {
@@ -543,7 +654,7 @@ fn handle(mut stream: TcpStream, state: &Shared, ui_dir: Option<&Path>) {
             json_reply(&mut stream, json!({"ok": true}))
         }
         ("POST", p) if p.starts_with("/api/") => {
-            let q = Query::parse(query);
+            let q = Query::parse(&req.query);
             let mut st = lock(state);
             let reply = match api(&mut st, p, &q) {
                 Ok(()) => json!({"ok": true, "current": current_json(&st)}),
@@ -557,13 +668,20 @@ fn handle(mut stream: TcpStream, state: &Shared, ui_dir: Option<&Path>) {
                 "" => "index.html",
                 rel => rel,
             };
-            match static_file(ui_dir, rel) {
+            match static_file(ui.dir.as_deref(), rel) {
                 Some(body) => respond(&mut stream, "200 OK", content_type(rel), &body),
                 None => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
             }
         }
         _ => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
     }
+}
+
+/// Where the UI comes from, plus its parsed catalog (MCP tools use its
+/// model and parameter names).
+struct Ui {
+    dir: Option<PathBuf>,
+    catalog: crate::mcp::Catalog,
 }
 
 pub fn run(port: u16, bank: u8, ui_dir: Option<PathBuf>) -> anyhow::Result<()> {
@@ -584,14 +702,22 @@ pub fn run(port: u16, bank: u8, ui_dir: Option<PathBuf>) -> anyhow::Result<()> {
         initial_bank: (bank.max(1) as usize).min(SLOT_COUNT / 4),
         ..Default::default()
     }));
+    let catalog = static_file(ui_dir.as_deref(), "catalog.json")
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .map(crate::mcp::Catalog)
+        .ok_or_else(|| anyhow::anyhow!("catalog.json missing or invalid"))?;
+    println!("MCP endpoint: http://<this-host>:{port}/mcp");
     start_scan(&state);
-    let ui_dir = Arc::new(ui_dir);
+    let ui = Arc::new(Ui {
+        dir: ui_dir,
+        catalog,
+    });
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
                 let state = state.clone();
-                let ui_dir = ui_dir.clone();
-                std::thread::spawn(move || handle(s, &state, ui_dir.as_deref()));
+                let ui = ui.clone();
+                std::thread::spawn(move || handle(s, &state, &ui));
             }
             Err(e) => eprintln!("connection error: {e}"),
         }

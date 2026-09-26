@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use pod_core::{AmpKnob, Block, PodDevice};
 
+mod mcp;
 mod serve;
 
 /// Dev/probe tool for reverse-engineering and testing the POD X3 USB
