@@ -1,0 +1,22 @@
+[Unit]
+Description=POD Controller (web editor + MCP server for the Line 6 POD X3 Live)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=podctl
+Group=podctl
+ExecStart=/opt/pod-controller/pod-cli serve --port 8080 --bank 8 --ui-dir /opt/pod-controller/ui
+Restart=on-failure
+RestartSec=3
+# Share the Zero 2 W politely with Companion Satellite.
+MemoryMax=96M
+Nice=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

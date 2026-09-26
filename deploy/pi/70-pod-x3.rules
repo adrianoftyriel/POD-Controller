@@ -1,0 +1,2 @@
+# POD X3 Live: control interface for pod-controller.service
+SUBSYSTEM=="usb", ATTR{idVendor}=="0e41", ATTR{idProduct}=="414b", MODE="0660", GROUP="podctl"
