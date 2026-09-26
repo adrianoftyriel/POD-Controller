@@ -84,6 +84,37 @@ in this doc) assumed a short chunk always terminates a message, which is
 wrong and caused real read failures against hardware.
 implementation: `PacketCompleter` in andree182/podx3.)
 
+## Host requirements (confirmed 2026-09-25)
+
+Found by testing pod-core and a pyusb harness against a real POD X3 Live
+with `usbmon` running. Before this, pod-core "wedged" the device after a
+message or two.
+
+1. **Keep a bulk-IN read pending.** With no IN transfer submitted, the POD
+   takes one OUT message and then NAKs every OUT after it, indefinitely
+   (the host sees a timeout). With an IN transfer pending, the same
+   sequences all go through: 4 of 4 trials each way, after a power cycle
+   each. The POD sends nothing on IN for plain sets, so the pending read
+   isn't draining anything. It just has to be there. It isn't a hard
+   wedge: submitting an IN read un-sticks a POD that has been NAKing, with
+   no power cycle. Gearbox keeps one IN transfer pending (in the captures
+   one is submitted before the capture starts and is still pending).
+   pod-core keeps 8 queued (`IN_QUEUE_DEPTH` in `device.rs`).
+2. **Send one 64-byte packet per transfer.** A 4176-byte patch write sent
+   as one bulk transfer, or as 256-byte transfers, is accepted at the USB
+   level but never acked, and the patch isn't written. The same bytes as
+   128- or 64-byte transfers get the `02`/`03` ack, and the patch reads
+   back byte for byte. Gearbox sends each 64-byte packet as its own
+   transfer. So the POD seems to lose packets that arrive back-to-back
+   rather than NAKing them. Single-packet messages (every live set) aren't
+   affected.
+3. **The Linux kernel driver has to be kept off.** `snd_usb_podhd` binds
+   to both interfaces on every plug-in or power cycle. pod-core claims
+   interface 1 without detaching it.
+4. **No control-transfer init is needed** for bulk I/O. All of the above
+   worked on a freshly powered POD that had never seen the `0x67` init
+   sequence.
+
 ## Message types (payload byte 0, after the 4-byte framing header)
 
 | Type | Meaning | Confirmed working? |
@@ -141,7 +172,7 @@ bytes look like source/destination addresses.
 | `02` | `02` | host->POD | **write patch to memory**: u32 slot + 4096-byte EffectDump (4108 bytes; byte +1 = `04`) |
 | `01` | `01` | POD->host | **EffectDump** reply (4104 bytes) |
 | `02` | `04` | host->POD | push one tone's 2048-byte block into the edit buffer |
-| `02` | `27` | host->POD | select patch slot, u32 arg = slot |
+| `02` | `27` | host->POD | slot for the tone pushes that follow (see "Patch load"); alone it doesn't change query ID `08` |
 | `02` | `03` | POD->host | ack for `02` writes and `04` pushes |
 
 Slot numbering is `(bank-1)*4 + channel`, with A=0..D=3 (5A = `0x10`).
@@ -272,6 +303,22 @@ patches:
 The `02`/`21` queries Gearbox sends after every patch load ask for IDs
 `03` and `07`, and the `04`/`22` replies carry their current values.
 
+A sweep of `02`/`21` IDs `00`-`3F` (2026-09-25) got `04`/`22` replies
+only for `00`-`08`, shaped `<hdr 04..22> <u32 0> <u32 id> <u32 value>`:
+
+| ID | Value seen | Guess |
+|---|---|---|
+| `00` | 0 | |
+| `01` | 1 | |
+| `02` | 436 (`0x1B4`) | firmware version? |
+| `03` | 0 | selected tone |
+| `04`-`06` | 0 | |
+| `07` | 0 | 1/4" outputs mode |
+| `08` | 31 (8D) | a patch slot, but not the one loaded: a full Gearbox-style load of 8B left it at 31. Maybe the power-on or last-written patch |
+
+IDs `09`-`3F` got no reply. The reply for `00` sometimes shows up only
+together with the next reply.
+
 The Variax Type menu (Electric/Acoustic/Bass) makes Gearbox re-push the
 tone, but nothing in the stored patch changes. It seems to only pick which
 list the Variax model menu shows.
@@ -377,6 +424,12 @@ reach.
   (select slot), push Tone 1 block, push Tone 2 block, `20` (select
   Tone 1), then `21` queries. Gearbox pushes its **cached** copy; nothing
   is read from the POD.
+  pod-core's `select_slot` does the same (reading the stored patch first).
+  Each tone push is acked by `02`/`03`. Before the first ack the POD may
+  send unsolicited `04`/`13` block announcements (seen: the volume block
+  at 2/5, value 0, on tone 1), so a host must match replies by type/sub
+  rather than taking the next message. A bare `02`/`27` without the pushes
+  is ignored as far as can be told.
 - **GET SELECTED**: `00` (request dump, slot) -> 4104-byte `01` reply,
   then the same load sequence as above using the fresh data.
 - **PUT SELECTED** (write, tested on 8D): `02`/`02` = slot `0x1F` + the

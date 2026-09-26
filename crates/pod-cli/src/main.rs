@@ -41,7 +41,8 @@ enum Command {
         #[arg(long)]
         file: PathBuf,
     },
-    /// Make a slot the active/live patch on the device.
+    /// Load a stored patch into the edit buffer (Gearbox's load sequence:
+    /// read it, then 02/27 + both tone pushes + select Tone 1).
     Select {
         #[arg(long)]
         slot: u8,
@@ -67,6 +68,12 @@ enum Command {
         block: Block,
         #[arg(long, action = clap::ArgAction::Set)]
         enabled: bool,
+    },
+    /// Read a device-wide setting with a 02/21 query (IDs 0-8 answer; 3 =
+    /// selected tone, 7 = 1/4" outputs mode).
+    Query {
+        #[arg(long)]
+        id: u32,
     },
     /// Send an arbitrary hex-encoded message and print each raw 64-byte
     /// bulk-IN packet received afterward, unprocessed (no chunk/message
@@ -156,8 +163,16 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Select { slot } => {
             let mut dev = PodDevice::open_first()?;
-            dev.select_slot(slot)?;
-            println!("Selected slot {slot}");
+            let patch = dev.select_slot(slot)?;
+            println!(
+                "Loaded slot {slot}: {}",
+                pod_core::blob::tone_name(&patch, pod_core::blob::TONE1_NAME_OFFSET)
+            );
+        }
+        Command::Query { id } => {
+            let mut dev = PodDevice::open_first()?;
+            let value = dev.query_setting(id)?;
+            println!("setting {id:#04x} = {value} ({value:#x})");
         }
         Command::SetAmp { tone, knob, value } => {
             let mut dev = PodDevice::open_first()?;

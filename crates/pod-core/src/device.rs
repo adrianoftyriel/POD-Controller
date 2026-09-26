@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use nusb::transfer::{Buffer, Bulk, In, Out};
 use nusb::{Endpoint, MaybeFuture};
@@ -9,12 +10,25 @@ use crate::protocol::{self, ChunkReassembler};
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Bulk-IN transfers kept submitted at all times.
+///
+/// The POD only accepts a bulk OUT message while the host has a bulk-IN
+/// transfer pending: with none queued it takes one message, then NAKs every
+/// OUT after it until an IN read is submitted (confirmed 2026-09-25, 4/4
+/// trials each way, see docs/PROTOCOL.md "Keep a bulk-IN read pending").
+/// This was the "wedge" that looked like a flaky cable. A few extra
+/// transfers give headroom for unsolicited messages arriving while nobody
+/// is reading.
+const IN_QUEUE_DEPTH: usize = 8;
+
 /// A connection to a POD X3's control interface.
 pub struct PodDevice {
     // Kept alive so the interface claim isn't released.
     _interface: nusb::Interface,
     out_ep: Endpoint<Bulk, Out>,
     in_ep: Endpoint<Bulk, In>,
+    /// Raw IN packets that have arrived but not been consumed yet.
+    inbox: VecDeque<Vec<u8>>,
 }
 
 /// Enumerate connected POD X3 / X3 Live devices.
@@ -46,54 +60,140 @@ impl PodDevice {
         let interface = device.claim_interface(protocol::CONTROL_INTERFACE).wait()?;
         let out_ep = interface.endpoint::<Bulk, Out>(protocol::BULK_OUT_EP)?;
         let in_ep = interface.endpoint::<Bulk, In>(protocol::BULK_IN_EP)?;
-        Ok(Self {
+        let mut dev = Self {
             _interface: interface,
             out_ep,
             in_ep,
-        })
+            inbox: VecDeque::new(),
+        };
+        dev.fill_in_queue();
+        Ok(dev)
     }
 
-    /// Send one bulk-framed message and read exactly `expected_reply_len`
-    /// bytes of reply, reassembling it if it spans multiple packets.
-    /// Callers must know the reply length up front — there's no in-band
-    /// end-of-message marker (see [`ChunkReassembler`]). This does not yet
-    /// implement the control-transfer init handshake (`CTRL_REQUEST`) —
-    /// callers should perform that once at startup if the device requires
-    /// it (unconfirmed whether it's strictly necessary before bulk I/O).
-    pub fn transact(&mut self, request: &[u8], expected_reply_len: usize) -> Result<Vec<u8>> {
+    fn fill_in_queue(&mut self) {
+        while self.in_ep.pending() < IN_QUEUE_DEPTH {
+            let buf = self.in_ep.allocate(protocol::BULK_PACKET_LEN);
+            self.in_ep.submit(buf);
+        }
+    }
+
+    /// Wait up to `timeout` for one IN transfer to complete, move its data
+    /// to the inbox and resubmit the buffer, so the queue never runs dry.
+    /// Returns whether a transfer completed.
+    fn poll_in(&mut self, timeout: Duration) -> Result<bool> {
+        let Some(completion) = self.in_ep.wait_next_complete(timeout) else {
+            return Ok(false);
+        };
+        let status = completion.status;
+        if status.is_ok() && !completion.buffer.is_empty() {
+            self.inbox.push_back(completion.buffer.to_vec());
+        }
+        self.in_ep.submit(completion.buffer);
+        status.map_err(|e| PodError::Transfer(format!("bulk IN failed: {e:?}")))?;
+        Ok(true)
+    }
+
+    /// Collect every IN transfer that has already completed, without
+    /// blocking.
+    fn poll_in_nowait(&mut self) -> Result<()> {
+        while self.poll_in(Duration::ZERO)? {}
+        Ok(())
+    }
+
+    /// Take every raw IN packet received so far that no reply has claimed,
+    /// e.g. the POD's unsolicited `04`/`13` block announcements.
+    pub fn take_unsolicited(&mut self) -> Result<Vec<Vec<u8>>> {
+        self.poll_in_nowait()?;
+        Ok(self.inbox.drain(..).collect())
+    }
+
+    /// Send one bulk-framed message and wait for the reply whose type byte
+    /// is `reply_type` and subcommand byte is `reply_sub`, reading exactly
+    /// `reply_len` bytes of it. Callers must know the reply length up front
+    /// — there's no in-band end-of-message marker (see [`ChunkReassembler`]).
+    ///
+    /// A message starts at a chunk flagged [`protocol::FLAG_FIRST`]. The POD
+    /// sends unsolicited messages (e.g. `04`/`13` block announcements, which
+    /// arrive before the ack of a tone push), so any message with a
+    /// different type/sub is skipped, as is anything already waiting in the
+    /// inbox. This does not implement the control-transfer init handshake
+    /// (`CTRL_REQUEST`), which bulk I/O works without.
+    pub fn transact(
+        &mut self,
+        request: &[u8],
+        reply_type: u8,
+        reply_sub: u8,
+        reply_len: usize,
+    ) -> Result<Vec<u8>> {
+        for stale in self.take_unsolicited()? {
+            tracing::debug!("dropping unsolicited packet {stale:02x?}");
+        }
         self.write_raw(request)?;
 
         let mut reassembler = ChunkReassembler::new();
-        let mut message = Vec::with_capacity(expected_reply_len);
-        while message.len() < expected_reply_len {
+        let mut message = Vec::with_capacity(reply_len);
+        let mut started = false;
+        loop {
             let packet = self.read_raw()?;
+            if packet.get(2).is_some_and(|f| f & protocol::FLAG_FIRST != 0) {
+                started = true;
+                reassembler = ChunkReassembler::new();
+                message.clear();
+            }
+            if !started {
+                continue;
+            }
             message.extend(reassembler.push(&packet)?);
+            if message.len() >= 8 && (message[0] != reply_type || message[7] != reply_sub) {
+                tracing::debug!("skipping unsolicited message {:02x?}", &message[..8]);
+                started = false;
+                continue;
+            }
+            if message.len() >= reply_len {
+                message.truncate(reply_len);
+                return Ok(message);
+            }
         }
-        Ok(message)
     }
 
     /// Send already chunk-framed bytes with no attempt to read a reply.
     /// Low-level primitive for RE/probing — prefer [`Self::transact`] or a
     /// typed method when the message shape is known.
+    ///
+    /// The data goes out as one 64-byte transfer per USB packet, waiting for
+    /// each to complete before sending the next. The POD silently drops a
+    /// message sent faster than that: a 4176-byte patch write as a single
+    /// transfer, or as 256-byte transfers, is never acked, while 128- and
+    /// 64-byte transfers are (2026-09-25). Gearbox sends 64 bytes at a time.
     pub fn write_raw(&mut self, data: &[u8]) -> Result<()> {
-        let mut buf = Buffer::new(data.len());
-        buf.extend_from_slice(data);
-        let completion = self.out_ep.transfer_blocking(buf, TIMEOUT);
-        completion
-            .status
-            .map_err(|e| PodError::Transfer(format!("bulk OUT failed: {e:?}")))?;
+        // Resubmit anything that completed so the IN queue is full before
+        // the POD sees this message (see IN_QUEUE_DEPTH).
+        self.poll_in_nowait()?;
+        for packet in data.chunks(protocol::BULK_PACKET_LEN) {
+            let mut buf = Buffer::new(packet.len());
+            buf.extend_from_slice(packet);
+            let completion = self.out_ep.transfer_blocking(buf, TIMEOUT);
+            completion
+                .status
+                .map_err(|e| PodError::Transfer(format!("bulk OUT failed: {e:?}")))?;
+        }
         Ok(())
     }
 
     /// Read one raw [`protocol::BULK_PACKET_LEN`]-byte bulk-IN packet, with
     /// no chunk/message reassembly. Low-level primitive for RE/probing.
     pub fn read_raw(&mut self) -> Result<Vec<u8>> {
-        let buf = Buffer::new(protocol::BULK_PACKET_LEN);
-        let completion = self.in_ep.transfer_blocking(buf, TIMEOUT);
-        completion
-            .status
-            .map_err(|e| PodError::Transfer(format!("bulk IN failed: {e:?}")))?;
-        Ok(completion.buffer.into_vec())
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Some(packet) = self.inbox.pop_front() {
+                return Ok(packet);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(PodError::Transfer("bulk IN failed: timed out".into()));
+            }
+            self.poll_in(left)?;
+        }
     }
 
     /// Set a float parameter on the currently loaded patch. Only
@@ -109,35 +209,94 @@ impl PodDevice {
     /// `docs/PROTOCOL.md` "Slot numbering".
     pub fn read_patch(&mut self, slot: u8) -> Result<Vec<u8>> {
         let request = protocol::encode_request_dump(slot);
-        let reply = self.transact(&request, 8 + protocol::EFFECT_DUMP_LEN)?;
+        let reply = self.transact(
+            &request,
+            protocol::MessageType::EffectDump as u8,
+            protocol::config_cmd::EFFECT_DUMP_REPLY,
+            8 + protocol::EFFECT_DUMP_LEN,
+        )?;
         protocol::decode_effect_dump(&reply).map(|patch| patch.to_vec())
     }
 
-    /// Write a raw, opaque EffectDump blob (as produced by [`Self::read_patch`])
-    /// to `slot`, and wait for the device's ack.
-    ///
-    /// The ack's exact length is unconfirmed against real hardware (only
-    /// the read path has been verified so far) — this reads a single raw
-    /// packet's worth and only checks the leading message-type byte. If
-    /// the real ack turns out to be multi-packet, this will misread it.
-    pub fn write_patch(&mut self, slot: u8, patch: &[u8]) -> Result<()> {
-        let message = protocol::encode_write_dump(slot, patch)?;
-        self.write_raw(&message)?;
-        let packet = self.read_raw()?;
-        let ack = ChunkReassembler::new().push(&packet)?;
-        if ack.first().copied() != Some(protocol::MessageType::ConfigCmd as u8) {
-            return Err(PodError::Protocol(format!(
-                "expected ConfigCmd ack after patch write, got {ack:02x?}"
-            )));
-        }
+    /// Send `message` and wait for the POD's 12-byte `02`/`03` ack (seen
+    /// after patch writes and tone pushes, sometimes split across two
+    /// chunks).
+    fn send_acked(&mut self, message: &[u8]) -> Result<()> {
+        self.transact(
+            message,
+            protocol::MessageType::ConfigCmd as u8,
+            protocol::config_cmd::ACK,
+            protocol::ACK_LEN,
+        )?;
         Ok(())
     }
 
-    /// Make `slot` the active/live patch on the device. Fire-and-forget:
-    /// no reply is documented for this message.
-    pub fn select_slot(&mut self, slot: u8) -> Result<()> {
-        let message = protocol::encode_select_slot(slot);
-        self.write_raw(&message)
+    /// Write a raw, opaque EffectDump blob (as produced by [`Self::read_patch`])
+    /// to `slot`, and wait for the device's ack. Confirmed on hardware
+    /// (2026-09-25): the stored patch reads back byte for byte.
+    pub fn write_patch(&mut self, slot: u8, patch: &[u8]) -> Result<()> {
+        let message = protocol::encode_write_dump(slot, patch)?;
+        self.send_acked(&message)
+    }
+
+    /// Push one tone's 2048-byte block (`tone` 0 or 1) into the edit buffer
+    /// and wait for the ack.
+    pub fn push_tone(&mut self, tone: u8, block: &[u8]) -> Result<()> {
+        let message = protocol::encode_push_tone(tone, block)?;
+        self.send_acked(&message)
+    }
+
+    /// Load the patch stored in `slot` into the edit buffer, the way Gearbox
+    /// does: `02`/`27` with the slot, both tone blocks pushed (each acked),
+    /// then Tone 1 selected for editing. Gearbox never sends `02`/`27`
+    /// without the pushes, and the POD doesn't answer a bare one, so it is
+    /// not treated as a load on its own. Returns the patch that was loaded.
+    pub fn select_slot(&mut self, slot: u8) -> Result<Vec<u8>> {
+        let patch = self.read_patch(slot)?;
+        self.load_patch(slot, &patch)?;
+        Ok(patch)
+    }
+
+    /// Load `patch` (a 4096-byte EffectDump) into the edit buffer as the
+    /// contents of `slot`, without writing it to memory.
+    pub fn load_patch(&mut self, slot: u8, patch: &[u8]) -> Result<()> {
+        if patch.len() != protocol::EFFECT_DUMP_LEN {
+            return Err(PodError::Protocol(format!(
+                "patch data must be exactly {} bytes, got {}",
+                protocol::EFFECT_DUMP_LEN,
+                patch.len()
+            )));
+        }
+        self.write_raw(&protocol::encode_select_slot(slot))?;
+        let (tone1, tone2) = patch.split_at(protocol::TONE_BLOCK_LEN);
+        self.push_tone(0, tone1)?;
+        self.push_tone(1, tone2)?;
+        self.write_raw(&protocol::encode_device_setting(
+            protocol::CHANNEL_PATCH,
+            protocol::setting::SELECTED_TONE,
+            0,
+        ))
+    }
+
+    /// Read a device-wide setting with a `02`/`21` query; the POD answers
+    /// with `04`/`22` carrying the value. IDs `00`-`08` answer (see
+    /// [`protocol::setting`]); others get no reply.
+    pub fn query_setting(&mut self, id: u32) -> Result<u32> {
+        let reply = self.transact(
+            &protocol::encode_query(id),
+            protocol::MessageType::IntParam12 as u8,
+            protocol::QUERY_REPLY_SUB,
+            protocol::QUERY_REPLY_LEN,
+        )?;
+        let got_id = u32::from_le_bytes(reply[12..16].try_into().expect("20-byte reply"));
+        if got_id != id {
+            return Err(PodError::Protocol(format!(
+                "query {id:#x} answered for id {got_id:#x}"
+            )));
+        }
+        Ok(u32::from_le_bytes(
+            reply[16..20].try_into().expect("20-byte reply"),
+        ))
     }
 
     /// Set an amp knob on `tone` (0 or 1) of the currently loaded patch.

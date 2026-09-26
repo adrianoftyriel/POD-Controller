@@ -28,6 +28,26 @@ pub const CTRL_REQUEST: u8 = 0x67;
 /// Size of a decoded EffectDump (patch) blob, in bytes.
 pub const EFFECT_DUMP_LEN: usize = 4096;
 
+/// Length of the POD's `02`/`03` ack message (8-byte header + u32 0).
+pub const ACK_LEN: usize = 12;
+/// One tone's block inside an EffectDump; Tone 2 follows Tone 1.
+pub const TONE_BLOCK_LEN: usize = 2048;
+
+/// Subcommand of the POD's `04`/`22` reply to a `02`/`21` query.
+pub const QUERY_REPLY_SUB: u8 = 0x22;
+/// Length of a `04`/`22` reply: header, u32 0, u32 id, u32 value.
+pub const QUERY_REPLY_LEN: usize = 20;
+
+/// Device-wide setting IDs, used by `04`/`20` sets and `02`/`21` queries
+/// (docs/PROTOCOL.md "Tone-level and global controls"). Only IDs `00`-`08`
+/// answer a query.
+pub mod setting {
+    /// Selected tone for editing (0/1).
+    pub const SELECTED_TONE: u32 = 0x03;
+    /// 1/4" outputs mode.
+    pub const OUTPUTS: u32 = 0x07;
+}
+
 /// Channel byte used in the 4-byte "route" field of the common message
 /// header for live parameter edits (the currently-loaded patch).
 pub const CHANNEL_LIVE: u8 = 0x01;
@@ -72,8 +92,13 @@ pub mod config_cmd {
     pub const WRITE_DUMP: u8 = 0x02;
     /// POD->host: ack for `WRITE_DUMP` writes and per-tone pushes.
     pub const ACK: u8 = 0x03;
-    /// host->POD: select patch slot, u32 arg = slot.
+    /// host->POD: select patch slot, u32 arg = slot. Only meaningful
+    /// followed by two `PUSH_TONE`s.
     pub const SELECT_SLOT: u8 = 0x27;
+    /// host->POD: push one tone's 2048-byte block into the edit buffer.
+    pub const PUSH_TONE: u8 = 0x04;
+    /// host->POD: query a device-wide setting, u32 arg = id.
+    pub const QUERY: u8 = 0x21;
     /// POD->host: EffectDump reply subcommand (message type is `0x01`, not
     /// `0x02`, but it shares the same "sub" header position).
     pub const EFFECT_DUMP_REPLY: u8 = 0x01;
@@ -87,6 +112,8 @@ pub mod int_set {
     pub const BLOCK_ENABLED: u8 = 0x13;
     /// Tempo-sync division for a block (0 = off).
     pub const TEMPO_SYNC: u8 = 0x14;
+    /// Device-wide setting (different shape, see `encode_device_setting`).
+    pub const DEVICE_SETTING: u8 = 0x20;
 }
 
 /// Float-set (`0x06`) subcommand byte for messages shaped like
@@ -356,6 +383,58 @@ pub fn encode_write_dump(slot: u8, patch: &[u8]) -> Result<Vec<u8>> {
     Ok(encode_chunks(&message))
 }
 
+/// Build a `02`/`04` push of one tone's 2048-byte block into the edit
+/// buffer (byte +1 is `02` for this message). The POD acks with `02`/`03`.
+pub fn encode_push_tone(tone: u8, block: &[u8]) -> Result<Vec<u8>> {
+    if block.len() != TONE_BLOCK_LEN {
+        return Err(PodError::Protocol(format!(
+            "tone block must be exactly {TONE_BLOCK_LEN} bytes, got {}",
+            block.len()
+        )));
+    }
+    let mut message = common_header(
+        MessageType::ConfigCmd as u8,
+        0x02,
+        CHANNEL_PATCH,
+        config_cmd::PUSH_TONE,
+    )
+    .to_vec();
+    message.extend_from_slice(&(tone as u32).to_le_bytes());
+    message.extend_from_slice(block);
+    Ok(encode_chunks(&message))
+}
+
+/// Build a `04`/`20` device-wide setting set: u32 0, u32 setting id, u32
+/// value. Gearbox sends it on channel `00` for UI changes and on
+/// [`CHANNEL_PATCH`] after loading a patch.
+pub fn encode_device_setting(channel: u8, id: u32, value: u32) -> Vec<u8> {
+    let mut message = common_header(
+        MessageType::IntParam12 as u8,
+        0x00,
+        channel,
+        int_set::DEVICE_SETTING,
+    )
+    .to_vec();
+    message.extend_from_slice(&0u32.to_le_bytes());
+    message.extend_from_slice(&id.to_le_bytes());
+    message.extend_from_slice(&value.to_le_bytes());
+    encode_chunks(&message)
+}
+
+/// Build a `02`/`21` query for a device-wide setting, on the live channel
+/// as Gearbox sends it. The POD answers `04`/`22`.
+pub fn encode_query(id: u32) -> Vec<u8> {
+    let mut message = common_header(
+        MessageType::ConfigCmd as u8,
+        0x00,
+        CHANNEL_LIVE,
+        config_cmd::QUERY,
+    )
+    .to_vec();
+    message.extend_from_slice(&id.to_le_bytes());
+    encode_chunks(&message)
+}
+
 /// Parse a reassembled EffectDump reply (type `0x01`, sub `0x01`): an
 /// 8-byte header followed by [`EFFECT_DUMP_LEN`] bytes of opaque patch data.
 /// `message` is a full message as returned by [`ChunkReassembler`] (chunk
@@ -487,6 +566,38 @@ mod tests {
             0x02, 0x00, 0x0A, 0x40, 0x02, 0x03, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
         ];
         assert_eq!(framed, encode_chunks(&expected_message));
+    }
+
+    #[test]
+    fn encode_device_setting_matches_gearbox_patch_load() {
+        // 041-hw-load-5a: "select Tone 1" sent after the tone pushes.
+        let msg = encode_device_setting(CHANNEL_PATCH, setting::SELECTED_TONE, 0);
+        assert_eq!(
+            msg[4..],
+            [0x04, 0x00, 0x0A, 0x40, 0x02, 0x03, 0x00, 0x20, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn encode_query_matches_gearbox() {
+        let msg = encode_query(setting::OUTPUTS);
+        assert_eq!(
+            msg[4..],
+            [0x02, 0x00, 0x0A, 0x40, 0x01, 0x03, 0x00, 0x21, 7, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn encode_push_tone_header_and_length() {
+        let msg = encode_push_tone(1, &[0u8; TONE_BLOCK_LEN]).unwrap();
+        let mut r = ChunkReassembler::new();
+        let body = r.push(&msg).unwrap();
+        assert_eq!(body.len(), 12 + TONE_BLOCK_LEN);
+        assert_eq!(
+            body[..12],
+            [0x02, 0x02, 0x0A, 0x40, 0x02, 0x03, 0x00, 0x04, 1, 0, 0, 0]
+        );
+        assert!(encode_push_tone(0, &[0u8; 10]).is_err());
     }
 
     #[test]

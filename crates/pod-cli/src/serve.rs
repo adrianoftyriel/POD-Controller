@@ -11,17 +11,11 @@ use std::time::{Duration, Instant};
 
 use pod_core::{AmpKnob, Block, PodDevice};
 
-/// Minimum gap enforced between any two messages sent to the device
-/// (regardless of channel). Not a confirmed hardware requirement — added
-/// after a live-channel float-set (`set_amp_knob`) immediately followed by
-/// a patch-channel read (`read_patch`) wedged a real POD X3 Live hard
-/// enough to need a power cycle (the OUT endpoint stopped accepting data
-/// for a full 2s host-side timeout). Every previously-confirmed sequence
-/// either stayed within one channel (a stream of live knob writes) or was
-/// a lone read; this pause guards the untested cross-channel case, which
-/// is exactly what interleaving the periodic `/api/patches` poll with a
-/// user's knob/block/select action does below.
-const MIN_INTER_MESSAGE_GAP: Duration = Duration::from_millis(300);
+/// Minimum gap enforced between any two messages sent to the device.
+/// This used to be 300 ms, to dodge a "wedge" that turned out to be
+/// pod-core not keeping a bulk-IN read pending (fixed in `PodDevice`); no
+/// gap is needed now, but the hook is kept in case one is.
+const MIN_INTER_MESSAGE_GAP: Duration = Duration::from_millis(0);
 
 const AMP_KNOBS: &[&str] = &["bass", "middle", "treble", "drive", "presence", "volume"];
 const BLOCKS: &[&str] = &[
@@ -308,7 +302,11 @@ fn patches_json(bank: u8, dev: &mut Option<PodDevice>, last_op: &mut Instant) ->
 fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
-        if k == key { Some(v) } else { None }
+        if k == key {
+            Some(v)
+        } else {
+            None
+        }
     })
 }
 
@@ -317,7 +315,7 @@ fn api_select(query: &str, dev: &mut Option<PodDevice>, last_op: &mut Instant) -
         return err_json("missing or invalid slot");
     };
     match with_device(dev, last_op, |d| d.select_slot(slot)) {
-        Ok(()) => ok_json(),
+        Ok(_) => ok_json(),
         Err(e) => err_json(&e.to_string()),
     }
 }
@@ -376,11 +374,7 @@ fn handle(mut stream: TcpStream, bank: u8, dev: &mut Option<PodDevice>, last_op:
             api_select(query, dev, last_op),
         ),
         ("POST", "/api/amp") => ("200 OK", "application/json", api_amp(query, dev, last_op)),
-        ("POST", "/api/block") => (
-            "200 OK",
-            "application/json",
-            api_block(query, dev, last_op),
-        ),
+        ("POST", "/api/block") => ("200 OK", "application/json", api_block(query, dev, last_op)),
         _ => ("404 Not Found", "text/plain", "not found".to_string()),
     };
 

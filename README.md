@@ -20,21 +20,23 @@ GPLv2) and tracks the parallel community effort in
 
 ## Status
 
-Reading patches from a real POD X3 Live is confirmed working
-(`pod-cli dump`). Live parameter edits (`select`, `set-amp`, `block`) have
-each been confirmed to send correctly-framed messages the device accepts
-(byte-verified against a real device via `usbmon`), but repeated use
-intermittently wedges the device's bulk endpoint — a write stops getting
-acknowledged and every following request times out, with no error logged by
-the host kernel at the moment it happens, needing a physical power cycle to
-recover. It doesn't reproduce on every attempt and isn't tied to a specific
-message or knob, which points at a marginal physical USB link (the same
-capture session logged a `device descriptor read` error and `invalid
-maxpacket` warnings on a plain reconnect, before any of this crate's code
-ran) rather than a bug in the framing/protocol code here. Try a different
-cable/port before assuming otherwise. `restore` (bulk patch write) is
-implemented against the documented protocol but not yet confirmed on
-hardware at all.
+Confirmed on a real POD X3 Live (2026-09-25): reading patches (`dump`),
+writing them (`restore`, byte-identical on readback), loading a stored
+patch (`select`), live edits (`set-amp`, `block`) and setting queries
+(`query`). Hundreds of edits in a row go through without trouble.
+
+The "wedge" that earlier looked like a flaky USB link was two host-side
+bugs, both fixed in `PodDevice` and described in `docs/PROTOCOL.md` under
+"Host requirements":
+
+- the POD accepts a bulk OUT message only while the host has a bulk-IN
+  read pending, so pod-core now keeps IN transfers queued all the time;
+- it drops a message whose packets arrive back-to-back, so writes now go
+  out as one 64-byte transfer per packet.
+
+On Linux, the kernel's `snd_usb_podhd` driver binds to the POD and has to
+be kept off it (`blacklist snd_usb_podhd` in `/etc/modprobe.d/`, or unbind
+it) before pod-core can claim the control interface.
 
 ## Planned phasing
 
