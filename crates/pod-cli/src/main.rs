@@ -1,6 +1,9 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
-use pod_core::protocol::{self, ParamNamespace};
-use pod_core::PodDevice;
+use pod_core::{AmpKnob, Block, PodDevice};
+
+mod serve;
 
 /// Dev/probe tool for reverse-engineering and testing the POD X3 USB
 /// protocol. Not an end-user application.
@@ -14,59 +17,100 @@ struct Cli {
 enum Command {
     /// List connected POD X3 / X3 Live devices.
     List,
-    /// Set a float parameter (knob) on the block currently at slot/group.
-    /// See docs/PROTOCOL.md "Effect knob map" for the slot/group/idx of
-    /// each block's knobs.
+    /// Set a float parameter (WARNING: only index 5 = tone volume is
+    /// confirmed correct; anything else is a guess).
     SetFloat {
-        #[arg(long, default_value_t = 0)]
-        tone: u8,
         #[arg(long)]
-        slot: u16,
-        #[arg(long)]
-        group: u16,
-        #[arg(long)]
-        idx: u16,
-        #[arg(long, value_enum, default_value_t = Namespace::Normal)]
-        namespace: Namespace,
+        index: u8,
         #[arg(long)]
         value: f32,
     },
-    /// Turn a block on or off.
-    SetEnabled {
-        #[arg(long, default_value_t = 0)]
+    /// Read a patch from the device and save its raw EffectDump blob to a
+    /// file (opaque bytes — no internal layout decoding).
+    Dump {
+        /// Slot index: (bank-1)*4 + channel, A=0..D=3 (e.g. 5A = 0x10).
+        #[arg(long)]
+        slot: u8,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write a previously dumped EffectDump blob back to a device slot.
+    Restore {
+        #[arg(long)]
+        slot: u8,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Load a stored patch into the edit buffer (Gearbox's load sequence:
+    /// read it, then 02/27 + both tone pushes + select Tone 1).
+    Select {
+        #[arg(long)]
+        slot: u8,
+    },
+    /// Set an amp knob (bass/middle/treble/drive/presence/volume) on the
+    /// currently loaded patch.
+    SetAmp {
+        /// Tone 0 or 1.
+        #[arg(long)]
         tone: u8,
         #[arg(long)]
-        slot: u16,
+        knob: AmpKnob,
         #[arg(long)]
-        group: u16,
+        value: f32,
+    },
+    /// Enable or disable a block (gate/wah/stomp/amp/eq/comp/mod/delay/reverb)
+    /// on the currently loaded patch, at its default chain position.
+    Block {
+        /// Tone 0 or 1.
         #[arg(long)]
+        tone: u8,
+        #[arg(long)]
+        block: Block,
+        #[arg(long, action = clap::ArgAction::Set)]
         enabled: bool,
     },
-    /// Select a patch slot as the active patch.
-    SelectPatch {
-        slot: u32,
+    /// Read a device-wide setting with a 02/21 query (IDs 0-8 answer; 3 =
+    /// selected tone, 7 = 1/4" outputs mode).
+    Query {
+        #[arg(long)]
+        id: u32,
     },
-    /// Request the EffectDump for a patch slot and print its length.
-    Dump {
-        slot: u32,
+    /// Send an arbitrary hex-encoded message and print each raw 64-byte
+    /// bulk-IN packet received afterward, unprocessed (no chunk/message
+    /// reassembly — there's no in-band end-of-message marker, so a generic
+    /// probe can't know how many bytes to expect). Dev/RE tool: for
+    /// probing message shapes that aren't yet wrapped in a typed command.
+    RawPackets {
+        /// Message bytes as hex, no spaces. Leave empty to just listen.
+        #[arg(long, default_value = "")]
+        message: String,
+        /// Number of 64-byte packets to read.
+        #[arg(long, default_value_t = 8)]
+        count: usize,
+    },
+    /// Serve a minimal live-view/live-edit web page for the device: patch
+    /// names polled every few seconds, plus amp knob, block toggle, and
+    /// patch-select controls that write straight to the currently loaded
+    /// patch in real time. Single-threaded — a quick way to watch and
+    /// poke at it, not something to expose beyond a trusted LAN.
+    Serve {
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Bank to show (1-32).
+        #[arg(long, default_value_t = 1)]
+        bank: u8,
     },
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum Namespace {
-    Normal,
-    Mix,
-    RealUnit,
-}
-
-impl From<Namespace> for ParamNamespace {
-    fn from(n: Namespace) -> Self {
-        match n {
-            Namespace::Normal => ParamNamespace::Normal,
-            Namespace::Mix => ParamNamespace::Mix,
-            Namespace::RealUnit => ParamNamespace::RealUnit,
-        }
+fn parse_hex(s: &str) -> anyhow::Result<Vec<u8>> {
+    let s = s.trim();
+    if !s.len().is_multiple_of(2) {
+        anyhow::bail!("hex string must have an even number of digits");
     }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(anyhow::Error::from))
+        .collect()
 }
 
 fn main() -> anyhow::Result<()> {
@@ -92,42 +136,89 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Command::SetFloat {
-            tone,
-            slot,
-            group,
-            idx,
-            namespace,
-            value,
-        } => {
+        Command::SetFloat { index, value } => {
             let mut dev = PodDevice::open_first()?;
-            let msg = protocol::encode_float_set(tone, slot, group, idx, namespace.into(), value);
-            dev.send(&msg)?;
-            println!("Sent float set tone={tone} slot={slot} group={group} idx={idx} value={value}");
+            dev.set_float_param(index, value)?;
+            println!("Sent float param index={index} value={value}");
         }
-        Command::SetEnabled {
+        Command::Dump { slot, out } => {
+            let mut dev = PodDevice::open_first()?;
+            let patch = dev.read_patch(slot)?;
+            std::fs::write(&out, &patch)?;
+            println!(
+                "Dumped slot {slot} ({} bytes) to {}",
+                patch.len(),
+                out.display()
+            );
+        }
+        Command::Restore { slot, file } => {
+            let patch = std::fs::read(&file)?;
+            let mut dev = PodDevice::open_first()?;
+            dev.write_patch(slot, &patch)?;
+            println!(
+                "Restored {} ({} bytes) to slot {slot}",
+                file.display(),
+                patch.len()
+            );
+        }
+        Command::Select { slot } => {
+            let mut dev = PodDevice::open_first()?;
+            let patch = dev.select_slot(slot)?;
+            println!(
+                "Loaded slot {slot}: {}",
+                pod_core::blob::tone_name(&patch, pod_core::blob::TONE1_NAME_OFFSET)
+            );
+        }
+        Command::Query { id } => {
+            let mut dev = PodDevice::open_first()?;
+            let value = dev.query_setting(id)?;
+            println!("setting {id:#04x} = {value} ({value:#x})");
+        }
+        Command::SetAmp { tone, knob, value } => {
+            let mut dev = PodDevice::open_first()?;
+            dev.set_amp_knob(tone, knob, value)?;
+            println!("Set tone {tone} amp {knob:?} = {value}");
+        }
+        Command::Block {
             tone,
-            slot,
-            group,
+            block,
             enabled,
         } => {
             let mut dev = PodDevice::open_first()?;
-            let msg = protocol::encode_block_enabled(tone, slot, group, enabled);
-            dev.send(&msg)?;
-            println!("Sent block enabled=({enabled}) tone={tone} slot={slot} group={group}");
+            dev.set_block_enabled(tone, block, enabled)?;
+            println!("Set tone {tone} block {block:?} enabled={enabled}");
         }
-        Command::SelectPatch { slot } => {
+        Command::RawPackets { message, count } => {
             let mut dev = PodDevice::open_first()?;
-            let msg = protocol::encode_select_patch(slot);
-            dev.send(&msg)?;
-            println!("Selected patch slot {slot}");
+            if !message.is_empty() {
+                let bytes = parse_hex(&message)?;
+                let framed = pod_core::protocol::encode_chunks(&bytes);
+                dev.write_raw(&framed)?;
+                println!("Sent {} message bytes.", bytes.len());
+            }
+            for i in 0..count {
+                match dev.read_raw() {
+                    Ok(packet) => println!(
+                        "packet[{i}] ({} bytes): {}",
+                        packet.len(),
+                        hex::encode(&packet)
+                    ),
+                    Err(e) => {
+                        println!("packet[{i}]: error: {e}");
+                        break;
+                    }
+                }
+            }
         }
-        Command::Dump { slot } => {
-            let mut dev = PodDevice::open_first()?;
-            let msg = protocol::encode_request_dump(slot);
-            let reply = dev.transact(&msg)?;
-            println!("Got EffectDump reply: {} bytes", reply.len());
+        Command::Serve { port, bank } => {
+            serve::run(port, bank)?;
         }
     }
     Ok(())
+}
+
+mod hex {
+    pub fn encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }

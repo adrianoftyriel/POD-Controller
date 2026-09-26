@@ -20,7 +20,23 @@ GPLv2) and tracks the parallel community effort in
 
 ## Status
 
-Early scaffolding. No working hardware communication yet in this repo.
+Confirmed on a real POD X3 Live (2026-09-25): reading patches (`dump`),
+writing them (`restore`, byte-identical on readback), loading a stored
+patch (`select`), live edits (`set-amp`, `block`) and setting queries
+(`query`). Hundreds of edits in a row go through without trouble.
+
+The "wedge" that earlier looked like a flaky USB link was two host-side
+bugs, both fixed in `PodDevice` and described in `docs/PROTOCOL.md` under
+"Host requirements":
+
+- the POD accepts a bulk OUT message only while the host has a bulk-IN
+  read pending, so pod-core now keeps IN transfers queued all the time;
+- it drops a message whose packets arrive back-to-back, so writes now go
+  out as one 64-byte transfer per packet.
+
+On Linux, the kernel's `snd_usb_podhd` driver binds to the POD and has to
+be kept off it (`blacklist snd_usb_podhd` in `/etc/modprobe.d/`, or unbind
+it) before pod-core can claim the control interface.
 
 ## Planned phasing
 

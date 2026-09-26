@@ -66,7 +66,54 @@ A message longer than 252 bytes is split across chunks: the first has flag
 payloads. Its total length comes from the message itself (e.g. 4104 for an
 EffectDump reply), not from any one header. `tools/vm-capture/msgs.py`
 reassembles this way. (Reference
+
+**Direction asymmetry, confirmed against a real POD X3 Live via `pod-cli`
+(2026-09-24):** the 252-byte chunk size above describes how *Gearbox*
+frames its writes; the *device's own* replies use one chunk per raw
+64-byte packet (4-byte header + up to 60 bytes payload each), and the
+first chunk of a reply is not necessarily full-size — a real EffectDump
+reply's opening chunk carried only 24 bytes (the 8-byte common header +
+the 16-byte tone-name field) before continuing for many more full
+60-byte chunks. **A chunk shorter than the sender's usual max does not
+mean "last chunk of the message."** There is no in-band end-of-message
+marker at all: a receiver must know the target message's total length
+up front (fixed per message type, e.g. 4104 for an EffectDump reply) and
+keep reading chunks until it has that many bytes. `pod-core`'s
+`ChunkReassembler` works this way; earlier code here (and prior wording
+in this doc) assumed a short chunk always terminates a message, which is
+wrong and caused real read failures against hardware.
 implementation: `PacketCompleter` in andree182/podx3.)
+
+## Host requirements (confirmed 2026-09-25)
+
+Found by testing pod-core and a pyusb harness against a real POD X3 Live
+with `usbmon` running. Before this, pod-core "wedged" the device after a
+message or two.
+
+1. **Keep a bulk-IN read pending.** With no IN transfer submitted, the POD
+   takes one OUT message and then NAKs every OUT after it, indefinitely
+   (the host sees a timeout). With an IN transfer pending, the same
+   sequences all go through: 4 of 4 trials each way, after a power cycle
+   each. The POD sends nothing on IN for plain sets, so the pending read
+   isn't draining anything. It just has to be there. It isn't a hard
+   wedge: submitting an IN read un-sticks a POD that has been NAKing, with
+   no power cycle. Gearbox keeps one IN transfer pending (in the captures
+   one is submitted before the capture starts and is still pending).
+   pod-core keeps 8 queued (`IN_QUEUE_DEPTH` in `device.rs`).
+2. **Send one 64-byte packet per transfer.** A 4176-byte patch write sent
+   as one bulk transfer, or as 256-byte transfers, is accepted at the USB
+   level but never acked, and the patch isn't written. The same bytes as
+   128- or 64-byte transfers get the `02`/`03` ack, and the patch reads
+   back byte for byte. Gearbox sends each 64-byte packet as its own
+   transfer. So the POD seems to lose packets that arrive back-to-back
+   rather than NAKing them. Single-packet messages (every live set) aren't
+   affected.
+3. **The Linux kernel driver has to be kept off.** `snd_usb_podhd` binds
+   to both interfaces on every plug-in or power cycle. pod-core claims
+   interface 1 without detaching it.
+4. **No control-transfer init is needed** for bulk I/O. All of the above
+   worked on a freshly powered POD that had never seen the `0x67` init
+   sequence.
 
 ## Message types (payload byte 0, after the 4-byte framing header)
 
@@ -125,7 +172,7 @@ bytes look like source/destination addresses.
 | `02` | `02` | host->POD | **write patch to memory**: u32 slot + 4096-byte EffectDump (4108 bytes; byte +1 = `04`) |
 | `01` | `01` | POD->host | **EffectDump** reply (4104 bytes) |
 | `02` | `04` | host->POD | push one tone's 2048-byte block into the edit buffer |
-| `02` | `27` | host->POD | select patch slot, u32 arg = slot |
+| `02` | `27` | host->POD | slot for the tone pushes that follow (see "Patch load"); alone it doesn't change query ID `08` |
 | `02` | `03` | POD->host | ack for `02` writes and `04` pushes |
 
 Slot numbering is `(bank-1)*4 + channel`, with A=0..D=3 (5A = `0x10`).
@@ -311,6 +358,22 @@ patches:
 The `02`/`21` queries Gearbox sends after every patch load ask for IDs
 `03` and `07`, and the `04`/`22` replies carry their current values.
 
+A sweep of `02`/`21` IDs `00`-`3F` (2026-09-25) got `04`/`22` replies
+only for `00`-`08`, shaped `<hdr 04..22> <u32 0> <u32 id> <u32 value>`:
+
+| ID | Value seen | Guess |
+|---|---|---|
+| `00` | 0 | |
+| `01` | 1 | |
+| `02` | 436 (`0x1B4`) | firmware version? |
+| `03` | 0 | selected tone |
+| `04`-`06` | 0 | |
+| `07` | 0 | 1/4" outputs mode |
+| `08` | 31 (8D) | a patch slot, but not the one loaded: a full Gearbox-style load of 8B left it at 31. Maybe the power-on or last-written patch |
+
+IDs `09`-`3F` got no reply. The reply for `00` sometimes shows up only
+together with the next reply.
+
 The Variax Type menu (Electric/Acoustic/Bass) makes Gearbox re-push the
 tone, but nothing in the stored patch changes. It seems to only pick which
 list the Variax model menu shows.
@@ -416,6 +479,12 @@ reach.
   (select slot), push Tone 1 block, push Tone 2 block, `20` (select
   Tone 1), then `21` queries. Gearbox pushes its **cached** copy; nothing
   is read from the POD.
+  pod-core's `select_slot` does the same (reading the stored patch first).
+  Each tone push is acked by `02`/`03`. Before the first ack the POD may
+  send unsolicited `04`/`13` block announcements (seen: the volume block
+  at 2/5, value 0, on tone 1), so a host must match replies by type/sub
+  rather than taking the next message. A bare `02`/`27` without the pushes
+  is ignored as far as can be told.
 - **GET SELECTED**: `00` (request dump, slot) -> 4104-byte `01` reply,
   then the same load sequence as above using the fresh data.
 - **PUT SELECTED** (write, tested on 8D): `02`/`02` = slot `0x1F` + the
@@ -451,16 +520,12 @@ treat this as confirmed once the POD accepts it.
    the constant at `0x40`, the ~0.57 float at `0x64`, and why tone 1 has a
    Variax copy at `0xD4`. Everything else the Gearbox UI exposes is now
    mapped.
-3. **How a live reader (not an offline capture parser) knows a message is
-   complete**, when a message's length is an exact multiple of 252 bytes.
-   `tools/vm-capture/msgs.py` decides message boundaries by looking at the
-   *next* chunk's `FLAG_FIRST` bit — sound for parsing a whole capture
-   after the fact, but a single `transact()` reply has no "next message" to
-   look ahead into. `pod-core`'s reassembler instead treats any chunk
-   shorter than 0xFC as the last one, which matches every capture on file
-   (e.g. the 4108-byte patch write's trailing 0x4C chunk) but is unverified
-   for a message that's an exact multiple of 252 bytes with no remainder —
-   worth confirming against real hardware once a candidate case is found.
+3. ~~How a live reader knows a message is complete.~~ Answered on
+   hardware (2026-09-25): a short chunk does **not** end a message (the
+   EffectDump reply opens with a 24-byte chunk, and the POD packs ~60
+   bytes per chunk), so a reader has to know the reply length for its
+   type/sub and skip unsolicited messages. See "Direction asymmetry" and
+   "Host requirements" above.
 4. **Whether MIDI CC / SysEx also works over the 5-pin DIN MIDI ports**,
    independent of USB. Line6 publishes an official MIDI CC chart for X3
    Live, but per `pod-ui` maintainer `arteme` (issue #70), full SysEx
