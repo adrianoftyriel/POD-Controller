@@ -473,6 +473,50 @@ fn param_rank(id: u32) -> u32 {
     ns << 16 | (id & 0xFFFF)
 }
 
+/// The owner's preferred parameter order for amps and stomp boxes (see the
+/// UI's PARAM_ORDER); unlisted parameters follow in rank order.
+const PARAM_ORDER: &[&str] = &[
+    "drive", "amount", "level", "threshold", "sustain", "ramp", "bass", "mid", "mid freq",
+    "treble", "presence", "frequency", "tone", "wave", "filter", "decay", "-1 oct", "-2 oct",
+    "interval", "sensitivity", "q", "gain", "volume",
+];
+
+fn canonical_param(name: &str) -> String {
+    let mut n = name.trim().to_ascii_lowercase();
+    while n.ends_with('.') {
+        n.pop();
+    }
+    n = n.split_whitespace().collect::<Vec<_>>().join(" ");
+    match n.as_str() {
+        "middle" | "mid" => "mid".to_string(),
+        "presense" => "presence".to_string(),
+        "mid frequency" => "mid freq".to_string(),
+        _ => n,
+    }
+}
+
+fn param_order_rank(name: &str) -> Option<usize> {
+    let c = canonical_param(name);
+    PARAM_ORDER.iter().position(|&p| p == c)
+}
+
+/// Sort a block's parameter views the way the UI shows them. Amp and stomp
+/// blocks use PARAM_ORDER first; everything falls back to `param_rank`.
+fn sort_param_views(key: &str, shown: &mut [(&ParamView, &blob::Param)]) {
+    if key == "amp" || key == "stomp" {
+        shown.sort_by(|a, b| {
+            match (param_order_rank(&a.0.name), param_order_rank(&b.0.name)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => param_rank(a.0.id).cmp(&param_rank(b.0.id)),
+            }
+        });
+    } else {
+        shown.sort_by_key(|(v, _)| param_rank(v.id));
+    }
+}
+
 fn model_name(catalog: &Catalog, key: &str, rec: &blob::Record) -> String {
     catalog
         .model_def(key, rec)
@@ -514,7 +558,7 @@ fn tone_view(catalog: &Catalog, patch: &[u8], tone: usize, hidden: bool) -> Valu
             }
             let views = param_views(catalog, key, &r);
             let mut shown: Vec<(&ParamView, &blob::Param)> = views.iter().zip(&r.params).collect();
-            shown.sort_by_key(|(v, _)| param_rank(v.id));
+            sort_param_views(key, &mut shown);
             let params: Vec<Value> = shown
                 .into_iter()
                 .filter(|(v, _)| hidden || !v.hidden)
@@ -896,6 +940,23 @@ mod tests {
             "https://evil.example",
             Some("172.16.88.33:8080")
         ));
+    }
+
+    #[test]
+    fn param_order_names() {
+        assert_eq!(canonical_param("Middle"), "mid");
+        assert_eq!(canonical_param("Presense"), "presence");
+        assert_eq!(canonical_param(" Mid Freq. "), "mid freq");
+        // Drive < Level < Sustain < Bass < Mid < Treble < Volume.
+        let rank = |n: &str| param_order_rank(n).unwrap();
+        assert!(rank("Drive") < rank("Level"));
+        assert!(rank("Level") < rank("Sustain"));
+        assert!(rank("Sustain") < rank("Bass"));
+        assert!(rank("Bass") < rank("Middle"));
+        assert!(rank("Middle") < rank("Treble"));
+        assert!(rank("Treble") < rank("Volume"));
+        assert!(param_order_rank("Mix").is_none());
+        assert!(param_order_rank("Param 3").is_none());
     }
 
     #[test]

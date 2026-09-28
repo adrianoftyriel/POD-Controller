@@ -32,6 +32,7 @@
     <span class="status-dot"></span><span id="status-text">connecting…</span>
   </div>
 
+  <button class="btn" id="btn-settings" title="Settings">⚙ Settings</button>
   <select id="theme-select" class="theme-select" title="Theme"></select>
 </header>
 
@@ -78,6 +79,43 @@
       <button class="btn close" id="banks-close" aria-label="Close">✕</button>
     </div>
     <div class="banks-grid" id="banks-grid"></div>
+  </div>
+</div>
+
+<!-- Settings: how parameters are drawn (faders or knobs). -->
+<div class="modal" id="settings-modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-head">
+      <h2 id="settings-title">Settings</h2>
+      <span class="modal-sub">How parameters are drawn</span>
+      <button class="btn close" id="settings-close" aria-label="Close">✕</button>
+    </div>
+    <div class="settings-body">
+      <div class="setting-group" data-setting="all">
+        <div class="setting-name">All parameters</div>
+        <div class="segmented" role="radiogroup" aria-label="All parameters">
+          <button data-value="fader" role="radio">Vertical faders</button>
+          <button data-value="knob" role="radio">Rotary knobs</button>
+        </div>
+      </div>
+      <div class="setting-group" data-setting="tone">
+        <div class="setting-name">Tone controls
+          <span class="setting-hint">(Bass, Middle, Treble, Presence, Tone)</span>
+        </div>
+        <div class="segmented" role="radiogroup" aria-label="Tone controls">
+          <button data-value="inherit" role="radio">Same as all</button>
+          <button data-value="fader" role="radio">Vertical faders</button>
+          <button data-value="knob" role="radio">Rotary knobs</button>
+        </div>
+      </div>
+      <div class="setting-group">
+        <div class="setting-name">Per-parameter overrides
+          <span class="setting-hint" id="overrides-count">none</span>
+        </div>
+        <button class="btn" id="btn-clear-overrides">Clear overrides</button>
+      </div>
+      <p class="setting-hint">Tip: press and hold any control to switch just that one.</p>
+    </div>
   </div>
 </div>
 

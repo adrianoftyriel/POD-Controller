@@ -106,6 +106,12 @@ enum Command {
         /// binary. Edits there show up on a browser reload.
         #[arg(long)]
         ui_dir: Option<PathBuf>,
+        /// Run a fake POD X3 Live in memory instead of talking to USB: all
+        /// 64 slots answer with generated names and a plausible patch, and
+        /// every edit succeeds without hardware. For UI/theme development
+        /// and demos (see designprompt.md).
+        #[arg(long)]
+        mock: bool,
     },
 }
 
@@ -217,8 +223,13 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Serve { port, bank, ui_dir } => {
-            serve::run(port, bank, ui_dir)?;
+        Command::Serve {
+            port,
+            bank,
+            ui_dir,
+            mock,
+        } => {
+            serve::run(port, bank, ui_dir, mock)?;
         }
     }
     Ok(())

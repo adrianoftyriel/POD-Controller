@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POD Controller — pick a design direction</title>
+<!--
+  Compares the candidate themes side by side, each rendered live in an
+  iframe against the same server (?theme=<id> forces a theme without saving
+  it in the browser). "Use this theme" remembers the choice and opens the
+  editor. Needs a running `pod-cli serve` (add --mock for no hardware). See
+  designprompt.md.
+-->
+<style>
+  :root { --bg:#0d0f13; --card:#17191f; --border:#2a2e37; --text:#eceef2; --dim:#9aa1ad; --accent:#2fd6c4; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 28px 32px 8px; }
+  h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--dim); max-width: 70ch; }
+  header a { color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; padding: 22px 32px 60px; }
+  @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .card-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .card h2 { margin: 0; font-size: 16px; }
+  .swatches { display: flex; gap: 4px; margin-left: auto; }
+  .swatch { width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgb(255 255 255 / 0.15); }
+  .blurb { padding: 12px 16px 0; color: var(--dim); font-size: 13px; }
+  .shot { position: relative; margin: 14px 16px; height: 340px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: #000; }
+  .shot iframe { border: 0; width: 1400px; height: 980px; transform-origin: 0 0; }
+  .card-foot { display: flex; align-items: center; gap: 12px; padding: 6px 16px 18px; }
+  .use { background: var(--accent); color: #04211d; border: 0; border-radius: 8px; padding: 9px 16px; font-weight: 700; cursor: pointer; }
+  .open { color: var(--dim); font-size: 13px; text-decoration: none; }
+  .open:hover { color: var(--text); }
+  .note { color: var(--dim); font-size: 12px; padding: 0 32px 40px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pick a design direction</h1>
+  <p>Four candidates, each rendered live in the editor below with a fake
+  device. Click <strong>Use this theme</strong> to remember one, or switch
+  any time from the theme menu in the editor. Back to the
+  <a href="/">editor</a>.</p>
+</header>
+<div class="grid" id="grid"></div>
+<p class="note" id="note">Live previews need this page served by
+<code>pod-cli serve</code>.</p>
+
+<script>
+'use strict';
+const THEMES = [
+  { id: 'mesa', name: '1 · Mesa',
+    blurb: 'Black chassis, brushed-steel panel, cream knobs and a red jewel glow. American high-gain backline.',
+    swatches: ['#0b0b0c', '#c8ced4', '#efe9dd', '#c1443a'] },
+  { id: 'neon', name: '2 · Neon Stage',
+    blurb: 'Deep indigo glass, magenta-to-cyan gradients, glowing enabled blocks. Loud, modern, unmissable.',
+    swatches: ['#0b0918', '#ff3d9a', '#35d6ff', '#5ef0c0'] },
+  { id: 'tweed', name: "3 · Tweed '59",
+    blurb: 'Lacquered Bassman tweed, darker and coarser, with cream plates and oxblood controls. Vintage daylight.',
+    swatches: ['#a9863f', '#7c2f1e', '#3f6b34', '#efe1bd'] },
+  { id: 'marshall', name: '4 · Marshall',
+    blurb: 'Black tolex, gold panel line, cream knobs and white piping. The British stack, stripped to its essentials.',
+    swatches: ['#0b0a08', '#c9a227', '#f0e6cf', '#e6c14a'] },
+];
+
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'style') n.style.cssText = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null) n.append(c);
+  return n;
+}
+
+function use(id) {
+  try { localStorage.setItem('pod-theme', id); } catch (_) { /* ignore */ }
+  location.href = '/';
+}
+
+const shots = [];
+function fit() {
+  for (const s of shots) {
+    const w = s.parentElement.clientWidth;
+    s.style.transform = `scale(${w / 1400})`;
+  }
+}
+
+const grid = document.getElementById('grid');
+for (const t of THEMES) {
+  const shot = el('iframe', { src: `/?theme=${t.id}&bank=8`, loading: 'lazy', title: t.name });
+  shots.push(shot);
+  grid.append(el('div', { class: 'card' },
+    el('div', { class: 'card-head' },
+      el('h2', {}, t.name),
+      el('div', { class: 'swatches' }, t.swatches.map((c) => el('span', { class: 'swatch', style: `background:${c}` })))),
+    el('p', { class: 'blurb' }, t.blurb),
+    el('div', { class: 'shot' }, shot),
+    el('div', { class: 'card-foot' },
+      el('button', { class: 'use', onclick: () => use(t.id) }, 'Use this theme'),
+      el('a', { class: 'open', href: `/?theme=${t.id}`, target: '_blank', rel: 'noopener' }, 'Open full size ↗'))));
+}
+fit();
+window.addEventListener('resize', fit);
+</script>
+</body>
+</html>

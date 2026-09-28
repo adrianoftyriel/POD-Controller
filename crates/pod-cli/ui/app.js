@@ -26,9 +26,47 @@ const STOMP_FAMILIES = { 0: 'Dynamics', 5: 'Distortion', 10: 'Filter & Synth' };
 const AMP_FAMILIES = { 2: 'Amps', 3: 'Model pack amps (03)', 4: 'Model pack amps (04)' };
 
 const THEMES = [
+  { id: 'mesa', name: '1 · Mesa' },
+  { id: 'neon', name: '2 · Neon Stage' },
+  { id: 'tweed', name: "3 · Tweed '59" },
+  { id: 'marshall', name: '4 · Marshall' },
   { id: 'studio-dark', name: 'Studio Dark' },
   { id: 'daylight', name: 'Daylight' },
 ];
+
+// How parameters are drawn: 'fader' (vertical, the default) or 'knob'.
+// `all` is the base rule, `tone` overrides it for the amp tone controls, and
+// `overrides` holds per-parameter choices made by press-and-hold.
+const CONTROLS_KEY = 'pod-controls';
+const TONE_CONTROLS = ['bass', 'middle', 'mid', 'treble', 'presence', 'tone'];
+const CTRL = loadControls();
+
+function loadControls() {
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(CONTROLS_KEY)); } catch (_) { /* ignore */ }
+  return {
+    all: raw?.all === 'knob' ? 'knob' : 'fader',
+    tone: raw?.tone === 'fader' || raw?.tone === 'knob' ? raw.tone : 'inherit',
+    overrides: (raw && typeof raw.overrides === 'object' && raw.overrides) || {},
+  };
+}
+
+function saveControls() {
+  try { localStorage.setItem(CONTROLS_KEY, JSON.stringify(CTRL)); } catch (_) { /* ignore */ }
+}
+
+function isToneControl(label) {
+  return TONE_CONTROLS.includes(String(label).toLowerCase().trim());
+}
+
+/// Which control to draw for a parameter: per-parameter override, else the
+/// tone rule (for tone controls), else the "all" rule.
+function controlFor(blockKey, paramId, label) {
+  const override = CTRL.overrides[`${blockKey}.${paramId}`];
+  if (override === 'fader' || override === 'knob') return override;
+  if (isToneControl(label)) return CTRL.tone === 'inherit' ? CTRL.all : CTRL.tone;
+  return CTRL.all;
+}
 
 // ---------------------------------------------------------------- state
 
@@ -197,6 +235,97 @@ function Fader(opts) {
     if (opts.defaultValue !== undefined) set(opts.defaultValue, true);
   });
   paint();
+  if (opts.onLongPress) onLongPress(node, opts.onLongPress);
+  return node;
+}
+
+// Press and hold (without moving) to run `handler`; cancelled by movement or
+// release. Used to offer switching a control between fader and knob.
+function onLongPress(node, handler) {
+  let timer = null, sx = 0, sy = 0;
+  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  node.addEventListener('pointerdown', (e) => {
+    if (e.button) return;
+    sx = e.clientX; sy = e.clientY;
+    clear();
+    timer = setTimeout(() => { timer = null; handler(); }, 550);
+  });
+  node.addEventListener('pointermove', (e) => {
+    if (Math.hypot(e.clientX - sx, e.clientY - sy) > 8) clear();
+  });
+  ['pointerup', 'pointercancel', 'pointerleave', 'blur'].forEach((ev) =>
+    node.addEventListener(ev, clear));
+}
+
+// A rotary knob with the same contract as Fader: drag (up/down), wheel,
+// arrow keys, double-click reset, role="slider" and aria values. Drag moves
+// vertically, so it feels like the fader it can replace.
+function Knob(opts) {
+  const node = el('div', { class: 'knob', tabindex: '0', role: 'slider' });
+  const dial = el('div', { class: 'knob-dial' }, el('div', { class: 'knob-pointer' }));
+  const valueEl = el('div', { class: 'knob-value' });
+  node.append(valueEl, dial, el('div', { class: 'knob-label' }, opts.label));
+  const min = opts.min ?? 0, max = opts.max ?? 1;
+  const range = max - min || 1;
+  const step = opts.step ?? range / 1000;
+  let value = opts.value ?? min;
+  const fmt = opts.format || ((v) => v.toFixed(2));
+  const clamp = (v) => Math.min(max, Math.max(min, v));
+  const quant = (v) => (step >= 1 ? Math.round(v) : v);
+  const paint = () => {
+    const frac = max > min ? (value - min) / (max - min) : 0;
+    node.style.setProperty('--knob-pos', frac);
+    node.style.setProperty('--knob-rot', `${-135 + frac * 270}deg`);
+    valueEl.textContent = fmt(value);
+    node.setAttribute('aria-valuenow', value);
+    node.setAttribute('aria-valuetext', fmt(value));
+  };
+  const set = (v, final) => {
+    v = quant(clamp(v));
+    if (v === value && !final) return;
+    value = v; paint();
+    opts.onInput?.(value);
+    if (final) opts.onChange?.(value);
+  };
+
+  node.setAttribute('aria-label', opts.label);
+  node.setAttribute('aria-valuemin', min);
+  node.setAttribute('aria-valuemax', max);
+  dial.addEventListener('pointerdown', (e) => {
+    dial.setPointerCapture(e.pointerId);
+    node.classList.add('dragging');
+    const startY = e.clientY, startVal = value;
+    const at = (ev) => set(startVal + ((startY - ev.clientY) / 150) * range);
+    const move = (ev) => at(ev);
+    const up = (ev) => {
+      at(ev);
+      opts.onChange?.(value);
+      node.classList.remove('dragging');
+      dial.removeEventListener('pointermove', move);
+      dial.removeEventListener('pointerup', up);
+      dial.removeEventListener('pointercancel', up);
+    };
+    dial.addEventListener('pointermove', move);
+    dial.addEventListener('pointerup', up);
+    dial.addEventListener('pointercancel', up);
+  });
+  node.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const inc = Math.max(step, range / 100);
+    set(value + (e.deltaY < 0 ? inc : -inc), true);
+  }, { passive: false });
+  node.addEventListener('keydown', (e) => {
+    const inc = Math.max(step, range / (e.shiftKey ? 10 : 100));
+    if (['ArrowUp', 'ArrowRight'].includes(e.key)) set(value + inc, true);
+    else if (['ArrowDown', 'ArrowLeft'].includes(e.key)) set(value - inc, true);
+    else return;
+    e.preventDefault();
+  });
+  node.addEventListener('dblclick', () => {
+    if (opts.defaultValue !== undefined) set(opts.defaultValue, true);
+  });
+  paint();
+  if (opts.onLongPress) onLongPress(node, opts.onLongPress);
   return node;
 }
 
@@ -312,6 +441,35 @@ function openBanks(mode) {
 }
 
 function closeBanks() { $('banks-modal').hidden = true; S.modalMode = null; }
+
+// ---------------------------------------------------------------- settings
+
+function renderControlSettings() {
+  document.querySelectorAll('#settings-modal .setting-group[data-setting]').forEach((group) => {
+    const cur = group.dataset.setting === 'all' ? CTRL.all : CTRL.tone;
+    group.querySelectorAll('.segmented button').forEach((b) => {
+      const on = b.dataset.value === cur;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+  });
+  const n = Object.keys(CTRL.overrides).length;
+  $('overrides-count').textContent = n ? `${n} parameter${n === 1 ? '' : 's'} set` : 'none';
+}
+
+function setControlSetting(name, value) {
+  if (name === 'all') CTRL.all = value === 'knob' ? 'knob' : 'fader';
+  else CTRL.tone = ['fader', 'knob', 'inherit'].includes(value) ? value : 'inherit';
+  saveControls();
+  renderControlSettings();
+  renderPanel();
+}
+
+function openSettings() {
+  $('settings-modal').hidden = false;
+  renderControlSettings();
+}
+function closeSettings() { $('settings-modal').hidden = true; }
 
 function renderBanksGrid() {
   if ($('banks-modal').hidden) return;
@@ -468,24 +626,77 @@ function paramRank(id) {
   return (NAMESPACE_ORDER[id.slice(0, 4)] ?? 4) * 0x10000 + parseInt(id.slice(4), 16);
 }
 
-function paramFaders(key, rec) {
+// Owner's preferred parameter order for amps and stomp boxes; anything not
+// listed follows, in the normal rank order. Matched by name, case-insensitive
+// (Middle/Mid and Presense/Presence are treated as the same).
+const PARAM_ORDER = [
+  'drive', 'amount', 'level', 'threshold', 'sustain', 'ramp',
+  'bass', 'mid', 'mid freq', 'treble', 'presence', 'frequency',
+  'tone', 'wave', 'filter', 'decay', '-1 oct', '-2 oct', 'interval',
+  'sensitivity', 'q', 'gain', 'volume',
+];
+const PARAM_ORDER_INDEX = new Map(PARAM_ORDER.map((n, i) => [n, i]));
+
+function canonicalParamName(name) {
+  const n = String(name).toLowerCase()
+    .replace(/[\u2212\u2013\u2014]/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/\.$/, '')
+    .trim();
+  if (n === 'middle' || n === 'mid') return 'mid';
+  if (n === 'presense') return 'presence';
+  if (n === 'mid frequency') return 'mid freq';
+  return n;
+}
+
+/// Sort amp/stomp parameters into the owner's order, keeping unlisted
+/// parameters after them in rank order.
+function sortByParamOrder(list) {
+  return list.slice().sort((a, b) => {
+    const ra = PARAM_ORDER_INDEX.get(canonicalParamName(a.d?.name ?? '')) ?? Infinity;
+    const rb = PARAM_ORDER_INDEX.get(canonicalParamName(b.d?.name ?? '')) ?? Infinity;
+    if (ra !== rb) return ra < rb ? -1 : 1;
+    return paramRank(a.p.id) - paramRank(b.p.id);
+  });
+}
+
+// Press-and-hold a parameter control to ask whether to show it the other way.
+function promptControlSwitch(key, id, label, current) {
+  const target = current === 'fader' ? 'knob' : 'fader';
+  const what = target === 'knob' ? 'a rotary knob' : 'a vertical fader';
+  const also = target === 'knob' ? 'fader' : 'knob';
+  if (!confirm(`Show "${label}" as ${what} instead of a ${also}?`)) return;
+  CTRL.overrides[`${key}.${id}`] = target;
+  saveControls();
+  renderPanel();
+  log(`${label}: now a ${target}`);
+}
+
+function paramControls(key, rec) {
   const def = modelDef(key, rec);
   const byId = new Map((def?.params ?? []).map((p) => [p.id, p]));
   const shown = rec.params
     .map((p) => ({ p, d: byId.get(p.id) }))
-    .filter(({ p, d }) => S.showHidden || !(d?.hidden ?? p.id.startsWith('3f20')))
-    .sort((a, b) => paramRank(a.p.id) - paramRank(b.p.id));
-  return shown.map(({ p, d }) => {
+    .filter(({ p, d }) => S.showHidden || !(d?.hidden ?? p.id.startsWith('3f20')));
+  const ordered = key === 'amp' || key === 'stomp'
+    ? sortByParamOrder(shown)
+    : shown.sort((a, b) => paramRank(a.p.id) - paramRank(b.p.id));
+  return ordered.map(({ p, d }) => {
     const min = Math.min(d?.min ?? 0, p.value), max = Math.max(d?.max ?? 1, p.value);
     const unit = d?.unit ?? '';
     const normalized = min === 0 && max === 1 && !unit;
-    return Fader({
-      label: d?.name ?? `Param ${p.id}`,
-      min, max, value: p.value, defaultValue: d?.default,
+    const label = d?.name ?? `Param ${p.id}`;
+    const common = {
+      label, min, max, value: p.value, defaultValue: d?.default,
       format: normalized ? (v) => Math.round(v * 100) : (v) => `${v.toFixed(1)}${unit ? ' ' + unit : ''}`,
       onInput: (v) => throttled(`p${S.tone}/${key}/${p.id}`, 40,
         () => api('param', { tone: S.tone, block: BLOCK[key], id: p.id, value: v })),
-    });
+    };
+    const kind = controlFor(key, p.id, label);
+    const onLongPress = () => promptControlSwitch(key, p.id, label, kind);
+    return kind === 'knob'
+      ? Knob({ ...common, onLongPress })
+      : Fader({ ...common, onLongPress });
   });
 }
 
@@ -507,11 +718,12 @@ function settingControl(key) {
       el('span', { class: 'setting-label' }, def.label), sel);
   }
   const isInt = def.type === 'int';
-  return Fader({
+  const common = {
     label: def.label, min: def.min, max: def.max, value, step: isInt ? 1 : undefined,
     format: isInt ? (v) => String(v) : (v) => Math.round(v * 100),
     onInput: (v) => throttled(`s${S.tone}/${key}`, 40, () => send(v)),
-  });
+  };
+  return controlFor('setting', key, def.label) === 'knob' ? Knob(common) : Fader(common);
 }
 
 // Menus go in a row above the faders.
@@ -558,7 +770,7 @@ function blockPanel(key) {
       el('input', { type: 'checkbox', checked: S.showHidden,
         onchange: (e) => { S.showHidden = e.target.checked; renderPanel(); } }),
       'show hidden params'));
-  const sections = [el('div', { class: 'fader-bank', dataset: { block: key } }, paramFaders(key, rec))];
+  const sections = [el('div', { class: 'fader-bank', dataset: { block: key } }, paramControls(key, rec))];
   if (!modelDef(key, rec)?.params_known) {
     sections.push(el('p', { class: 'panel-note' },
       'Knob names for this model are not known yet; the faders are its stored parameters.'));
@@ -638,9 +850,11 @@ function renderAll() {
   renderPanel();
 }
 
-function applyTheme(id) {
+function applyTheme(id, persist = true) {
   document.documentElement.dataset.theme = id;
-  try { localStorage.setItem('pod-theme', id); } catch (_) { /* private mode */ }
+  if (persist) {
+    try { localStorage.setItem('pod-theme', id); } catch (_) { /* private mode */ }
+  }
 }
 
 function wire() {
@@ -653,7 +867,8 @@ function wire() {
   }, { passive: false });
   document.addEventListener('keydown', (e) => {
     if (e.target.closest('input, select, textarea, [role=slider]')) return;
-    if (e.key === 'Escape' && !$('banks-modal').hidden) closeBanks();
+    if (e.key === 'Escape' && !$('settings-modal').hidden) closeSettings();
+    else if (e.key === 'Escape' && !$('banks-modal').hidden) closeBanks();
     else if (e.key === 'ArrowLeft' || e.key === 'PageUp') setBank(S.bank - 1);
     else if (e.key === 'ArrowRight' || e.key === 'PageDown') setBank(S.bank + 1);
   });
@@ -667,6 +882,20 @@ function wire() {
   };
   $('banks-close').onclick = closeBanks;
   $('banks-modal').addEventListener('click', (e) => { if (e.target.id === 'banks-modal') closeBanks(); });
+  $('btn-settings').onclick = openSettings;
+  $('settings-close').onclick = closeSettings;
+  $('settings-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'settings-modal') closeSettings();
+    const b = e.target.closest('.segmented button');
+    if (b) setControlSetting(b.closest('.setting-group').dataset.setting, b.dataset.value);
+  });
+  $('btn-clear-overrides').onclick = () => {
+    CTRL.overrides = {};
+    saveControls();
+    renderControlSettings();
+    renderPanel();
+    log('Cleared per-parameter overrides');
+  };
   $('patch-name').onclick = () => startRename('patch-name', 'patch-name-edit', 0);
   $('tone-name').onclick = () => startRename('tone-name', 'tone-name-edit', S.tone);
   document.querySelectorAll('.tone-tab').forEach((t) => {
@@ -680,8 +909,12 @@ function wire() {
   for (const t of THEMES) ts.append(el('option', { value: t.id }, t.name));
   let saved = null;
   try { saved = localStorage.getItem('pod-theme'); } catch (_) { /* ignore */ }
-  ts.value = THEMES.some((t) => t.id === saved) ? saved : THEMES[0].id;
-  applyTheme(ts.value);
+  // ?theme=<id> forces a theme for previews (e.g. /themes.html) without
+  // changing the browser's remembered choice.
+  const forced = new URLSearchParams(location.search).get('theme');
+  const forcedValid = THEMES.some((t) => t.id === forced);
+  ts.value = forcedValid ? forced : (THEMES.some((t) => t.id === saved) ? saved : THEMES[0].id);
+  applyTheme(ts.value, !forcedValid);
   ts.onchange = () => applyTheme(ts.value);
   window.addEventListener('beforeunload', (e) => {
     if (S.current?.dirty) { e.preventDefault(); e.returnValue = ''; }

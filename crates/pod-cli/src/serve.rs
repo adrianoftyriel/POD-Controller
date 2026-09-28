@@ -61,6 +61,10 @@ const EMBEDDED: &[(&str, &[u8])] = &[
     ("style.css", include_bytes!("../ui/style.css")),
     ("app.js", include_bytes!("../ui/app.js")),
     ("catalog.json", include_bytes!("../ui/catalog.json")),
+    (
+        "assets/diamond-plate.jpg",
+        include_bytes!("../ui/assets/diamond-plate.jpg"),
+    ),
 ];
 
 pub(crate) struct Working {
@@ -81,6 +85,9 @@ pub(crate) struct State {
     /// Bumped on every successful edit/load/save, so a browser can tell the
     /// working copy changed under it (e.g. by an MCP client).
     pub(crate) rev: u64,
+    /// `--mock`: answer without USB. All 64 slots hold a generated patch.
+    pub(crate) mock: bool,
+    pub(crate) mock_slots: Vec<Vec<u8>>,
 }
 
 pub(crate) type Shared = Arc<Mutex<State>>;
@@ -116,6 +123,174 @@ fn with_device<T>(
 pub(crate) fn slot_code(slot: usize) -> String {
     format!("{:02}{}", slot / 4 + 1, (b'A' + (slot % 4) as u8) as char)
 }
+
+// --- fake device (`--mock`) -------------------------------------------------
+
+/// Names for the fake device's 64 slots, in slot order.
+const MOCK_NAMES: [&str; 64] = [
+    "Midnight Clean", "Surf's Up", "Chimey Vox", "Tweed B-Man",
+    "Brit Silver", "Garage Crunch", "Plexi Lead", "Class A Crunch",
+    "Jazz Clean", "Bluesbreaker", "Dumble Smooth", "Boutique OD",
+    "Funk Wah", "Auto-Wah Groove", "Envelope Filter", "Talk Box",
+    "Analog Echo", "Tape Delay", "Ping Pong", "Reverse Lead",
+    "Lux Spring", "Hall Cathedral", "Plate Shimmer", "Room Ambience",
+    "Recto Lead", "Insane Lead", "Modern Metal", "Drop Tune",
+    "Scratch A", "Scratch B", "Demo Clean", "Demo Lead",
+    "Acoustic Sim", "Variax Acoustic", "Nashville Tweed", "Pedal Steel",
+    "Country Twang", "Tele Chicken", "B-Bender", "Slide Blues",
+    "Chorus Clean", "Flanger Jet", "Phaser Sweep", "Rotary Organ",
+    "Octave Fuzz", "Big Muff", "Fuzz Face", "Bit Crusher",
+    "Synth Pad", "Synth Lead", "Filter Sweep", "S&H Noise",
+    "Bass DI", "Bass Amp", "Bass Chorus", "Bass Synth",
+    "Ambient Bloom", "Post Rock", "Swell Pad", "Pitch Shift",
+    "Load Box", "Direct Out", "Headphones", "Test Tone",
+];
+
+/// The catalog model the fake device prefers for each block, so panels show
+/// real model and parameter names rather than "No Amp".
+fn mock_preferred(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "amp" => "Line 6 21st Century Clean",
+        "cab" => "1x12 2001 Line 6",
+        "stomp" => "Blue Comp",
+        "mod" => "Sine Chorus",
+        "delay" => "Analog Delay",
+        "reverb" => "'Lux Spring",
+        "gate" => "Noise Gate",
+        "comp" => "Compressor",
+        "eq" => "4 Band SemiParametric EQ",
+        "wah" => "Vetta Wah",
+        "volume" => "Volume",
+        "loop" => "FX Loop",
+        _ => return None,
+    })
+}
+
+fn hex_id(s: &str) -> Option<u32> {
+    u32::from_str_radix(s, 16).ok()
+}
+
+/// One block record for the fake device, taken from the catalog.
+fn mock_record(catalog: &Value, key: &str, slot: usize, index: usize) -> blob::Record {
+    let models = catalog["blocks"]
+        .as_array()
+        .and_then(|a| a.iter().find(|b| b["key"] == key))
+        .and_then(|b| b["models"].as_array());
+    let usable = |m: &&Value| {
+        m["params_known"].as_bool() == Some(true)
+            && m["params"].as_array().is_some_and(|p| !p.is_empty())
+    };
+    let model = models.and_then(|ms| {
+        mock_preferred(key)
+            .and_then(|name| ms.iter().find(|m| m["name"] == name))
+            .or_else(|| ms.iter().find(usable))
+    });
+    let (category, table, model_id) = model
+        .map(|m| {
+            (
+                m["category"].as_u64().unwrap_or(2) as u8,
+                m["table"].as_u64().unwrap_or(0) as u8,
+                m["model"].as_u64().unwrap_or(0) as u16,
+            )
+        })
+        .unwrap_or((2, 0, 0));
+    let params = model
+        .and_then(|m| m["params"].as_array())
+        .map(|ps| {
+            ps.iter()
+                .enumerate()
+                .filter_map(|(pi, p)| {
+                    let id = hex_id(p["id"].as_str()?)?;
+                    let value = match p["default"].as_f64() {
+                        Some(d) => d,
+                        // Unnamed/hidden parameters have no default: vary them
+                        // so neighbouring slots don't look identical.
+                        None => 0.3 + ((slot * 7 + index * 3 + pi) % 6) as f64 * 0.1,
+                    };
+                    Some(blob::Param {
+                        id,
+                        value: value.clamp(0.0, 1.0) as f32,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let group = match key {
+        // Movable blocks: half the slots place them before the amp, half after.
+        "volume" | "loop" | "mod" | "delay" | "reverb" => {
+            if (slot + index) % 2 == 0 {
+                2
+            } else {
+                5
+            }
+        }
+        _ => 0,
+    };
+    let always_on = matches!(key, "amp" | "cab" | "volume" | "loop");
+    blob::Record {
+        model: model_id,
+        table,
+        category,
+        slot: index as u16,
+        group,
+        enabled: always_on || (slot + index) % 5 != 0,
+        sync: 0,
+        params,
+    }
+}
+
+/// A plausible 4096-byte EffectDump for `slot`: both tones, real catalog
+/// models, tone 1 named after the slot.
+fn mock_patch(catalog: &Value, slot: usize) -> Vec<u8> {
+    let mut patch = vec![0u8; 2 * blob::TONE_LEN];
+    for tone in 0..2 {
+        let name = if tone == 0 {
+            MOCK_NAMES[slot].to_string()
+        } else {
+            format!("Tone 2 {}", slot + 1)
+        };
+        let _ = blob::set_tone_name(&mut patch, tone, &name);
+        for (index, key) in blob::RECORD_NAMES.iter().enumerate() {
+            let rec = mock_record(catalog, key, slot, index);
+            let _ = blob::set_record(&mut patch, tone, index, &rec);
+        }
+        for s in blob::TONE_SETTINGS {
+            let value = match s.key {
+                "variax_model" => 0.0,
+                "variax_tone" => (slot % 128) as f64,
+                "mic" => 0.0,
+                "room" => 0.25,
+                "input" => 0.0,
+                _ => 0.0,
+            };
+            let _ = blob::set_setting(&mut patch, tone, s, value);
+        }
+    }
+    patch
+}
+
+/// Fill a mock state's slots and names from the catalog. `current` is set to
+/// the first slot of `initial_bank`.
+fn seed_mock(st: &mut State, catalog: &Value) {
+    st.mock = true;
+    st.mock_slots = (0..SLOT_COUNT).map(|s| mock_patch(catalog, s)).collect();
+    st.names = st
+        .mock_slots
+        .iter()
+        .map(|p| Some(blob::tone_name(p, 0)))
+        .collect();
+    st.scanned = SLOT_COUNT;
+    st.scanning = false;
+    let slot = (st.initial_bank.saturating_sub(1)) * 4;
+    let patch = st.mock_slots[slot].clone();
+    st.names[slot] = Some(blob::tone_name(&patch, 0));
+    st.current = Some(Working {
+        slot,
+        patch,
+        dirty: false,
+    });
+}
+
 
 // --- JSON views -------------------------------------------------------------
 
@@ -173,16 +348,25 @@ pub(crate) fn current_json(st: &State) -> Value {
 }
 
 fn state_json(st: &State) -> Value {
-    let device = pod_core::find_devices().ok().and_then(|d| {
-        d.first().map(|d| {
-            json!({
-                "product_id": format!("{:04x}", d.product_id()),
-                "live": d.product_id() == protocol::PRODUCT_ID_X3_LIVE,
-                "bus": d.busnum(),
-                "addr": d.device_address(),
+    let device = if st.mock {
+        Some(json!({
+            "product_id": format!("{:04x}", protocol::PRODUCT_ID_X3_LIVE),
+            "live": true,
+            "bus": 1,
+            "addr": 5,
+        }))
+    } else {
+        pod_core::find_devices().ok().and_then(|d| {
+            d.first().map(|d| {
+                json!({
+                    "product_id": format!("{:04x}", d.product_id()),
+                    "live": d.product_id() == protocol::PRODUCT_ID_X3_LIVE,
+                    "bus": d.busnum(),
+                    "addr": d.device_address(),
+                })
             })
         })
-    });
+    };
     json!({
         "connected": device.is_some(),
         "device": device,
@@ -294,7 +478,14 @@ fn err(e: impl std::fmt::Display) -> String {
 
 /// Read `slot` from memory and load it into the POD's edit buffer.
 fn load(st: &mut State, slot: usize) -> Result<(), String> {
-    let patch = with_device(st, |d| d.select_slot(slot as u8)).map_err(err)?;
+    let patch = if st.mock {
+        st.mock_slots
+            .get(slot)
+            .cloned()
+            .ok_or_else(|| format!("no mock slot {slot}"))?
+    } else {
+        with_device(st, |d| d.select_slot(slot as u8)).map_err(err)?
+    };
     st.names[slot] = Some(blob::tone_name(&patch, 0));
     st.current = Some(Working {
         slot,
@@ -307,6 +498,9 @@ fn load(st: &mut State, slot: usize) -> Result<(), String> {
 fn push_tone(st: &mut State, tone: usize) -> Result<(), String> {
     let w = working(st)?;
     let block = w.patch[tone * blob::TONE_LEN..(tone + 1) * blob::TONE_LEN].to_vec();
+    if st.mock {
+        return Ok(());
+    }
     with_device(st, |d| d.push_tone(tone as u8, &block)).map_err(err)
 }
 
@@ -342,7 +536,13 @@ fn api_inner(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
         "/api/save" => {
             let slot = slot_arg(q)?;
             let patch = working(st)?.patch.clone();
-            with_device(st, |d| d.write_patch(slot as u8, &patch)).map_err(err)?;
+            if st.mock {
+                if let Some(s) = st.mock_slots.get_mut(slot) {
+                    *s = patch.clone();
+                }
+            } else {
+                with_device(st, |d| d.write_patch(slot as u8, &patch)).map_err(err)?;
+            }
             st.names[slot] = Some(blob::tone_name(&patch, 0));
             let w = working(st)?;
             w.slot = slot;
@@ -359,6 +559,9 @@ fn api_inner(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
         }
         "/api/tone" => {
             let tone = tone_arg(q)?;
+            if st.mock {
+                return Ok(());
+            }
             let msg = protocol::encode_device_setting(
                 0x00,
                 protocol::setting::SELECTED_TONE,
@@ -374,6 +577,9 @@ fn api_inner(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
             let rec = blob::record(&w.patch, tone, block).map_err(err)?;
             blob::set_param(&mut w.patch, tone, block, id, value).map_err(err)?;
             w.dirty = true;
+            if st.mock {
+                return Ok(());
+            }
             with_device(st, |d| {
                 d.set_param_at(tone as u8, rec.slot, rec.group, id, value)
             })
@@ -396,6 +602,9 @@ fn api_inner(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
                 addrs.push((rec.slot, rec.group));
             }
             w.dirty = true;
+            if st.mock {
+                return Ok(());
+            }
             with_device(st, |d| {
                 addrs
                     .iter()
@@ -432,6 +641,9 @@ fn api_inner(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
             rec.enabled = true;
             blob::set_record(&mut w.patch, tone, block, &rec).map_err(err)?;
             w.dirty = true;
+            if st.mock {
+                return Ok(());
+            }
             with_device(st, |d| {
                 d.move_block(tone as u8, old_slot, old_group, slot, group)
             })
@@ -445,6 +657,9 @@ fn api_inner(st: &mut State, path: &str, q: &Query) -> Result<(), String> {
             let w = working(st)?;
             blob::set_setting(&mut w.patch, tone, s, value).map_err(err)?;
             w.dirty = true;
+            if st.mock {
+                return Ok(());
+            }
             let v = if s.is_float {
                 ToneValue::Float(value as f32)
             } else {
@@ -464,6 +679,12 @@ pub(crate) fn start_scan(state: &Shared) {
     {
         let mut st = lock(state);
         if st.scanning {
+            return;
+        }
+        if st.mock {
+            // The fake device's names are already seeded.
+            st.scanned = SLOT_COUNT;
+            st.scanning = false;
             return;
         }
         st.scanning = true;
@@ -684,28 +905,34 @@ struct Ui {
     catalog: crate::mcp::Catalog,
 }
 
-pub fn run(port: u16, bank: u8, ui_dir: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn run(port: u16, bank: u8, ui_dir: Option<PathBuf>, mock: bool) -> anyhow::Result<()> {
     let ui_dir = ui_dir.or_else(|| {
         let dev_tree = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
         dev_tree.is_dir().then_some(dev_tree)
     });
     let listener = TcpListener::bind(("0.0.0.0", port))?;
     println!(
-        "Serving the POD editor on http://<this-host>:{port}/ (UI from {})",
+        "Serving the POD editor on http://<this-host>:{port}/ (UI from {}{})",
         ui_dir
             .as_ref()
             .map(|d| d.display().to_string())
-            .unwrap_or_else(|| "built-in copy".into())
+            .unwrap_or_else(|| "built-in copy".into()),
+        if mock { ", fake device" } else { "" }
     );
-    let state: Shared = Arc::new(Mutex::new(State {
-        names: vec![None; SLOT_COUNT],
-        initial_bank: (bank.max(1) as usize).min(SLOT_COUNT / 4),
-        ..Default::default()
-    }));
     let catalog = static_file(ui_dir.as_deref(), "catalog.json")
         .and_then(|b| serde_json::from_slice(&b).ok())
         .map(crate::mcp::Catalog)
         .ok_or_else(|| anyhow::anyhow!("catalog.json missing or invalid"))?;
+    let mut state = State {
+        names: vec![None; SLOT_COUNT],
+        initial_bank: (bank.max(1) as usize).min(SLOT_COUNT / 4),
+        ..Default::default()
+    };
+    if mock {
+        seed_mock(&mut state, &catalog.0);
+        println!("Mock device: 64 patches in memory, nothing touches USB.");
+    }
+    let state: Shared = Arc::new(Mutex::new(state));
     println!("MCP endpoint: http://<this-host>:{port}/mcp");
     start_scan(&state);
     let ui = Arc::new(Ui {
